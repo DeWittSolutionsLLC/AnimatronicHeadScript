@@ -1,0 +1,42 @@
+{
+  "serial": {
+    "port": "COM5",
+    "baud_rate": 9600,
+    "timeout": 2.0,
+    "mock": false,
+    "debug": true
+  },
+  "ollama": {
+    "url": "http://localhost:11434/api/chat",
+    "model": "llama3.2",
+    "max_tokens": 300,
+    "max_history": 20
+  },
+  "tts": {
+    "engine": "edge-tts",
+    "rate": 150,
+    "volume": 1.0,
+    "voice_index": 0,
+    "edge_voice": "en-US-GuyNeural"
+  },
+  "mouth": {
+    "open_angle": 60,
+    "closed_angle": 90,
+    "word_open_ms": 80
+  },
+  "idle": {
+    "enabled": true,
+    "interval_min": 2.0,
+    "interval_max": 5.0,
+    "jitter": 12
+  },
+  "emotion_servos": {
+    "neutral":   { "eyes_ud": 90,  "eyes_lr": 90 },
+    "happy":     { "eyes_ud": 75,  "eyes_lr": 90 },
+    "sad":       { "eyes_ud": 105, "eyes_lr": 90 },
+    "curious":   { "eyes_ud": 80,  "eyes_lr": 75 },
+    "surprised": { "eyes_ud": 65,  "eyes_lr": 90 },
+    "angry":     { "eyes_ud": 100, "eyes_lr": 90 },
+    "thinking":  { "eyes_ud": 80,  "eyes_lr": 60 }
+  }
+}
