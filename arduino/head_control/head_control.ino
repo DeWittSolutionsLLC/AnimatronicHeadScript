@@ -16,8 +16,6 @@
 //  moving servos. Useful when no servos are physically connected.
 // ============================================================
 
-#define TEST_MODE
-
 #include <Servo.h>
 
 Servo mouthServo;

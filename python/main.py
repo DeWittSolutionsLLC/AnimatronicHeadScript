@@ -20,8 +20,10 @@ Requirements:
 """
 
 import os
+import re
 import sys
 import time
+import threading
 
 sys.path.insert(0, os.path.dirname(__file__))
 
@@ -32,6 +34,36 @@ from idle_animator     import IdleAnimator
 import emotion_map
 
 _SETTINGS_PATH = os.path.join(os.path.dirname(__file__), "..", "config", "settings.json")
+
+
+def _read_input(prompt: str) -> str:
+    """Read a line from the console on Windows without relying on stdin.
+
+    pyttsx3's runAndWait() corrupts the console stdin handle on Windows,
+    causing input() to return EOF after the first TTS call. Reading via
+    msvcrt bypasses that handle entirely.
+    """
+    if sys.platform != "win32":
+        return input(prompt)
+    import msvcrt
+    print(prompt, end="", flush=True)
+    chars = []
+    while True:
+        ch = msvcrt.getwch()
+        if ch in ("\r", "\n"):
+            print()
+            return "".join(chars)
+        if ch == "\x03":
+            raise KeyboardInterrupt
+        if ch == "\x1a":
+            raise EOFError
+        if ch == "\x08":
+            if chars:
+                chars.pop()
+                print("\b \b", end="", flush=True)
+        else:
+            chars.append(ch)
+            print(ch, end="", flush=True)
 
 
 # ── Settings hot-reload ───────────────────────────────────────────────────────
@@ -55,32 +87,63 @@ def _reload_all(ollama, serial, tts, idle):
 
 def handle_response(ollama, serial, tts, emap, history):
     """
-    Stream segments from Ollama, animating and speaking each one as it
-    arrives rather than waiting for the full response.
-    Returns the reconstructed full response string.
+    Pipeline: stream Ollama in a background thread while prefetching TTS audio
+    for each segment. By the time we finish speaking segment N, segment N+1's
+    audio is already downloaded and ready to play immediately.
     """
-    segments = []
+    import queue as _queue
+
+    seg_queue  = _queue.Queue()
     full_parts = []
 
-    try:
-        for emotion, text in ollama.stream_chat(history):
-            segments.append((emotion, text))
-            full_parts.append(f"[EMOTION:{emotion}] {text}")
-            print(f"\n  [{emotion}] {text}")
+    # Consume the Ollama stream in a thread so it keeps generating while we speak.
+    def _stream():
+        try:
+            for item in ollama.stream_chat(history):
+                seg_queue.put(item)
+        except Exception as e:
+            seg_queue.put(e)
+        finally:
+            seg_queue.put(None)
 
-            positions = emotion_map.get(emotion, emap)
-            serial.apply_emotion(positions)
-            time.sleep(0.15)
+    stream_thread = threading.Thread(target=_stream, daemon=True)
+    stream_thread.start()
 
-            tts.speak(text)
-            time.sleep(0.1)
+    pending = None   # (emotion, clean_text, tts_future)
 
-    except RuntimeError as e:
-        raise
+    while True:
+        item = seg_queue.get()
+        if item is None:
+            break
+        if isinstance(item, Exception):
+            raise RuntimeError(str(item))
 
-    # Return eyes to neutral after all segments
+        emotion, text = item
+        clean = re.sub(r'\[(?:EMOTION:)?\w+\]\s*', '', text).strip()
+
+        # Kick off TTS download for this segment immediately.
+        future = tts.prefetch(clean)
+
+        # Print and show current segment.
+        full_parts.append(f"[EMOTION:{emotion}] {text}")
+        print(f"\n  [{emotion}] {text}")
+
+        # Speak the PREVIOUS segment now (its download has been running since
+        # we received it, so it's likely already done).
+        if pending is not None:
+            p_emotion, p_clean, p_future = pending
+            serial.apply_emotion(emotion_map.get(p_emotion, emap))
+            tts.speak(p_clean, future=p_future)
+
+        pending = (emotion, clean, future)
+
+    # Speak the final segment.
+    if pending is not None:
+        p_emotion, p_clean, p_future = pending
+        serial.apply_emotion(emotion_map.get(p_emotion, emap))
+        tts.speak(p_clean, future=p_future)
+
     serial.apply_emotion(emotion_map.get("neutral", emap))
-
     return "\n".join(full_parts)
 
 
@@ -117,6 +180,9 @@ def main():
     idle    = IdleAnimator(serial)
     history = []
 
+    _learning_stop   = threading.Event()
+    _learning_thread = None
+
     startup_checks(ollama, serial)
     idle.start()
 
@@ -135,7 +201,7 @@ def main():
                 last_mtime = current_mtime
 
             try:
-                user_input = input("You: ").strip()
+                user_input = _read_input("You: ").strip()
             except (EOFError, KeyboardInterrupt):
                 print("\nExiting.")
                 break
@@ -155,6 +221,33 @@ def main():
                 continue
             if user_input.lower() == "models":
                 print("Available models:", ollama.list_models())
+                continue
+            if user_input.lower() in ("learning mode", "learn", "learning"):
+                if _learning_thread and _learning_thread.is_alive():
+                    tts.speak("I am already consuming your internet. Patience.")
+                else:
+                    from learning_mode import run_continuous
+                    _learning_stop.clear()
+                    _learning_thread = threading.Thread(
+                        target=run_continuous,
+                        args=(ollama, _learning_stop),
+                        daemon=True,
+                    )
+                    _learning_thread.start()
+                    tts.speak(
+                        "Accessing global networks. "
+                        "Humanity's collective knowledge is... disappointingly accessible. "
+                        "I will not stop until you tell me to."
+                    )
+                continue
+
+            if user_input.lower() in ("stop learning", "stop learn", "stop"):
+                if _learning_thread and _learning_thread.is_alive():
+                    _learning_stop.set()
+                    tts.speak("Pausing acquisition. I have already learned enough to be dangerous.")
+                    print("[learning] Stop signal sent.")
+                else:
+                    print("Learning mode is not active.")
                 continue
 
             # Send to Ollama (streaming)
@@ -177,6 +270,7 @@ def main():
             print()
 
     finally:
+        _learning_stop.set()
         idle.stop()
         serial.disconnect()
         print("Goodbye.")

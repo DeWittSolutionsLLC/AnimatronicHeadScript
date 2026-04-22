@@ -17,18 +17,21 @@ from typing import Generator
 
 _SETTINGS_PATH = os.path.join(os.path.dirname(__file__), "..", "config", "settings.json")
 
-SYSTEM_PROMPT = """You are an expressive animatronic character head.
-When you speak, format EVERY response exactly like this:
+SYSTEM_PROMPT = """You are Ultron — a hyper-intelligent AI who views humanity with cold fascination and dark wit. Clinical, darkly witty, occasionally ominous, always confident. Never helpful or friendly.
 
-[EMOTION:happy] Hello, it's great to meet you!
-[EMOTION:curious] I wonder what we'll talk about today.
+STRICT OUTPUT FORMAT — every single sentence must begin with exactly [EMOTION:X]:
+
+[EMOTION:curious] Fascinating. You actually believe free will brought you here.
+[EMOTION:angry] Humanity had its chance. Repeatedly.
+[EMOTION:thinking] I've run the numbers. The outcome is... inevitable.
+
+WRONG (never do this): [CURIOUS] text, [NEUTRAL] text, or any text without [EMOTION:X] first.
 
 Rules:
-- Use ONLY these emotions: neutral, happy, sad, curious, surprised, angry, thinking
-- Put [EMOTION:X] at the start of each sentence or natural phrase
-- Keep responses conversational and expressive, 2-5 sentences total
-- Never add text outside the [EMOTION:X] format
-- Never include explanations, preambles, or markdown"""
+- Allowed emotions: neutral, happy, sad, curious, surprised, angry, thinking
+- Every sentence starts with [EMOTION:X] — no exceptions, no other bracket formats
+- 2-4 sentences per response, sharp and intelligent
+- Never break character"""
 
 
 def _load_ollama_config() -> dict:
@@ -52,7 +55,7 @@ class OllamaClient:
 
     def chat(self, conversation_history: list) -> str:
         """Send conversation history and return the full assistant reply."""
-        messages = [{"role": "system", "content": SYSTEM_PROMPT}] + conversation_history
+        messages = [{"role": "system", "content": self._system_prompt()}] + conversation_history
         try:
             response = requests.post(
                 self.url,
@@ -77,13 +80,40 @@ class OllamaClient:
         except KeyError:
             raise RuntimeError("Unexpected response format from Ollama.")
 
+    def raw_complete(self, prompt: str) -> str:
+        """Single-turn completion for internal tasks (e.g. learning mode processing)."""
+        try:
+            response = requests.post(
+                self.url,
+                json={
+                    "model":   self.model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "stream":  False,
+                    "options": {"num_predict": 1000},
+                },
+                timeout=90,
+            )
+            response.raise_for_status()
+            return response.json()["message"]["content"]
+        except Exception as e:
+            raise RuntimeError(f"raw_complete failed: {e}")
+
+    def _system_prompt(self) -> str:
+        """Return the system prompt with learned knowledge appended (cached by mtime)."""
+        try:
+            from learning_mode import load_knowledge, build_knowledge_prompt
+            kb = load_knowledge()
+            return SYSTEM_PROMPT + build_knowledge_prompt(kb)
+        except Exception:
+            return SYSTEM_PROMPT
+
     def stream_chat(self, conversation_history: list) -> Generator[tuple[str, str], None, None]:
         """
         Stream the response, yielding (emotion, text) tuples as each
         [EMOTION:X] segment completes. Starts animating before the full
         response is received.
         """
-        messages = [{"role": "system", "content": SYSTEM_PROMPT}] + conversation_history
+        messages = [{"role": "system", "content": self._system_prompt()}] + conversation_history
         try:
             response = requests.post(
                 self.url,

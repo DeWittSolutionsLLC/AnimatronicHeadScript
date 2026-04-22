@@ -1,15 +1,15 @@
 {
   "serial": {
-    "port": "COM5",
+    "port": "COM3",
     "baud_rate": 9600,
     "timeout": 2.0,
     "mock": false,
-    "debug": true
+    "debug": false
   },
   "ollama": {
     "url": "http://localhost:11434/api/chat",
     "model": "llama3.2",
-    "max_tokens": 300,
+    "max_tokens": 150,
     "max_history": 20
   },
   "tts": {
@@ -17,12 +17,14 @@
     "rate": 150,
     "volume": 1.0,
     "voice_index": 0,
-    "edge_voice": "en-US-GuyNeural"
+    "edge_voice": "en-US-EricNeural",
+    "edge_rate": "-5%",
+    "edge_pitch": "-35Hz"
   },
   "mouth": {
-    "open_angle": 60,
+    "open_angle": 180,
     "closed_angle": 90,
-    "word_open_ms": 80
+    "word_open_ms": 200
   },
   "idle": {
     "enabled": true,
