@@ -22,9 +22,9 @@
     "edge_pitch": "-35Hz"
   },
   "mouth": {
-    "open_angle": 180,
+    "open_angle": 130,
     "closed_angle": 90,
-    "word_open_ms": 200
+    "word_open_ms": 100
   },
   "idle": {
     "enabled": true,

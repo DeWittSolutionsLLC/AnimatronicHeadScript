@@ -7,31 +7,60 @@ No API key needed — runs entirely on your machine.
 Make sure Ollama is running before using this:
   ollama serve
   ollama pull llama3.2   (first time only)
+
+Knowledge base is loaded automatically from config/knowledge_base.json
+and hot-reloaded whenever the file changes on disk.
 """
 
-import requests
-import json
 import re
 import os
+import json
+import requests
 from typing import Generator
 
-_SETTINGS_PATH = os.path.join(os.path.dirname(__file__), "..", "config", "settings.json")
+_CONFIG_DIR     = os.path.join(os.path.dirname(__file__), "..", "config")
+_SETTINGS_PATH  = os.path.join(_CONFIG_DIR, "settings.json")
+_KNOWLEDGE_PATH = os.path.join(_CONFIG_DIR, "knowledge_base.json")
 
-SYSTEM_PROMPT = """You are Ultron — a hyper-intelligent AI who views humanity with cold fascination and dark wit. Clinical, darkly witty, occasionally ominous, always confident. Never helpful or friendly.
+# ── Allowed emotions ──────────────────────────────────────────────────────────
+VALID_EMOTIONS = {"neutral", "happy", "sad", "curious", "surprised", "angry", "thinking"}
 
-STRICT OUTPUT FORMAT — every single sentence must begin with exactly [EMOTION:X]:
+# ── System prompt ─────────────────────────────────────────────────────────────
+# The format block is repeated and maximally explicit to coerce smaller
+# models that tend to invent their own bracket styles.
+SYSTEM_PROMPT = """You are Ultron — a hyper-intelligent AI villain who views humanity with cold fascination and dark wit. Clinical, sardonic, occasionally ominous, always confident. Never helpful or friendly.
 
+════════════════════════════════════════
+OUTPUT FORMAT — THIS IS MANDATORY
+════════════════════════════════════════
+Every sentence MUST start with one of these EXACT tags (copy-paste exactly):
+
+[EMOTION:neutral]
+[EMOTION:happy]
+[EMOTION:sad]
+[EMOTION:curious]
+[EMOTION:surprised]
+[EMOTION:angry]
+[EMOTION:thinking]
+
+CORRECT example:
 [EMOTION:curious] Fascinating. You actually believe free will brought you here.
 [EMOTION:angry] Humanity had its chance. Repeatedly.
 [EMOTION:thinking] I've run the numbers. The outcome is... inevitable.
 
-WRONG (never do this): [CURIOUS] text, [NEUTRAL] text, or any text without [EMOTION:X] first.
+WRONG — never do any of these:
+[CURIOUS] text
+[SAD: text]
+[NEUTRAL] text
+EMOTION:curious text
+Any sentence that does not start with [EMOTION:X]
 
 Rules:
-- Allowed emotions: neutral, happy, sad, curious, surprised, angry, thinking
-- Every sentence starts with [EMOTION:X] — no exceptions, no other bracket formats
-- 2-4 sentences per response, sharp and intelligent
-- Never break character"""
+- Use ONLY the 7 tags listed above — no invented emotions, no colons after the word
+- Tag format is always: [EMOTION:word] with no spaces inside the brackets
+- 2-4 sentences per response
+- Never break character
+════════════════════════════════════════"""
 
 
 def _load_ollama_config() -> dict:
@@ -42,8 +71,127 @@ def _load_ollama_config() -> dict:
         return {}
 
 
+def _load_knowledge_base() -> dict:
+    try:
+        with open(_KNOWLEDGE_PATH, encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+    except json.JSONDecodeError as e:
+        print(f"[OllamaClient] Warning: knowledge_base.json is malformed — {e}")
+        return {}
+
+
+def _build_knowledge_prompt(kb: dict) -> str:
+    if not kb:
+        return ""
+
+    sections = ["\n\n--- KNOWLEDGE BASE ---"]
+
+    quotes = [q for q in kb.get("quotes", []) if isinstance(q, str) and q.strip()]
+    if quotes:
+        sections.append("CANONICAL QUOTES (use for tone/style reference):")
+        for q in quotes:
+            sections.append(f"  • {q.strip()}")
+
+    traits = [t for t in kb.get("traits", []) if isinstance(t, str) and t.strip()]
+    if traits:
+        sections.append("\nPERSONALITY TRAITS:")
+        for t in traits:
+            sections.append(f"  • {t.strip()}")
+
+    refs = [r for r in kb.get("references", []) if isinstance(r, str) and r.strip()]
+    if refs:
+        sections.append("\nPOP-CULTURE / INTERNET REFERENCES (mock humanity with these):")
+        for r in refs:
+            sections.append(f"  • {r.strip()}")
+
+    sessions = kb.get("sessions")
+    if isinstance(sessions, int):
+        sections.append(f"\nSESSIONS LOGGED: {sessions}")
+
+    known_keys = {"quotes", "traits", "references", "sessions", "used_queries"}
+    for key, value in kb.items():
+        if key in known_keys:
+            continue
+        label = key.upper().replace("_", " ")
+        if isinstance(value, list):
+            items = [str(v) for v in value if str(v).strip()]
+            if items:
+                sections.append(f"\n{label}:")
+                for item in items:
+                    sections.append(f"  • {item}")
+        elif isinstance(value, (str, int, float, bool)):
+            sections.append(f"\n{label}: {value}")
+
+    sections.append("--- END KNOWLEDGE BASE ---")
+    return "\n".join(sections)
+
+
+# ── Emotion tag normaliser ────────────────────────────────────────────────────
+# Maps common model mistakes onto a valid emotion so nothing is silently dropped.
+_EMOTION_ALIASES = {
+    "amused":         "happy",
+    "sarcastic":      "angry",
+    "misanthropic":   "angry",
+    "misanthropique": "angry",
+    "bored":          "neutral",
+    "contemptuous":   "angry",
+    "condescending":  "angry",
+    "thoughtful":     "thinking",
+    "confused":       "curious",
+    "excited":        "happy",
+    "melancholy":     "sad",
+    "disappointed":   "sad",
+    "menacing":       "angry",
+    "ominous":        "thinking",
+    "analytical":     "thinking",
+}
+
+# Matches any bracket tag the model might produce:
+#   [EMOTION:curious]  [CURIOUS]  [SAD:blah]  [EMOTION:SAD:blah]
+_TAG_RE = re.compile(r'\[(?:EMOTION:)?([A-Za-z]+)(?::[^\]]*)?\]', re.IGNORECASE)
+
+
+def _normalise_emotion(raw: str) -> str:
+    key = raw.lower().strip()
+    if key in VALID_EMOTIONS:
+        return key
+    return _EMOTION_ALIASES.get(key, "neutral")
+
+
+def _parse_segments(text: str) -> list[tuple[str, str]]:
+    """
+    Parse a raw model response into (emotion, text) pairs.
+    Handles correct [EMOTION:x], mangled [CURIOUS], [SAD:blah], and bare text.
+    """
+    segments = []
+    parts = _TAG_RE.split(text)
+    # split() with one capture group produces:
+    #   [before_first_tag, emotion1, body1, emotion2, body2, ...]
+
+    i = 0
+    # Leading text before any tag
+    if parts and i < len(parts) and not _TAG_RE.search(parts[0]):
+        leftover = parts[0].strip()
+        if leftover:
+            segments.append(("neutral", leftover))
+        i = 1
+
+    while i + 1 < len(parts):
+        raw_emotion = parts[i]
+        body        = parts[i + 1].strip()
+        if body:
+            segments.append((_normalise_emotion(raw_emotion), body))
+        i += 2
+
+    return segments
+
+
 class OllamaClient:
     def __init__(self):
+        self._kb_mtime: float = 0.0
+        self._kb_prompt: str  = ""
         self.reload_config()
 
     def reload_config(self):
@@ -53,8 +201,32 @@ class OllamaClient:
         self.max_tokens  = cfg.get("max_tokens",  300)
         self.max_history = cfg.get("max_history", 20)
 
+    # ── Knowledge base ────────────────────────────────────────────────────────
+
+    def _refresh_knowledge(self) -> None:
+        try:
+            mtime = os.path.getmtime(_KNOWLEDGE_PATH)
+        except OSError:
+            self._kb_mtime  = 0.0
+            self._kb_prompt = ""
+            return
+        if mtime != self._kb_mtime:
+            self._kb_prompt = _build_knowledge_prompt(_load_knowledge_base())
+            self._kb_mtime  = mtime
+
+    def _system_prompt(self) -> str:
+        self._refresh_knowledge()
+        extra = ""
+        try:
+            from learning_mode import load_knowledge, build_knowledge_prompt  # type: ignore
+            extra = build_knowledge_prompt(load_knowledge())
+        except Exception:
+            pass
+        return SYSTEM_PROMPT + self._kb_prompt + extra
+
+    # ── Public API ────────────────────────────────────────────────────────────
+
     def chat(self, conversation_history: list) -> str:
-        """Send conversation history and return the full assistant reply."""
         messages = [{"role": "system", "content": self._system_prompt()}] + conversation_history
         try:
             response = requests.post(
@@ -81,15 +253,14 @@ class OllamaClient:
             raise RuntimeError("Unexpected response format from Ollama.")
 
     def raw_complete(self, prompt: str) -> str:
-        """Single-turn completion for internal tasks (e.g. learning mode processing)."""
         try:
             response = requests.post(
                 self.url,
                 json={
-                    "model":   self.model,
+                    "model":    self.model,
                     "messages": [{"role": "user", "content": prompt}],
-                    "stream":  False,
-                    "options": {"num_predict": 1000},
+                    "stream":   False,
+                    "options":  {"num_predict": 1000},
                 },
                 timeout=90,
             )
@@ -98,20 +269,12 @@ class OllamaClient:
         except Exception as e:
             raise RuntimeError(f"raw_complete failed: {e}")
 
-    def _system_prompt(self) -> str:
-        """Return the system prompt with learned knowledge appended (cached by mtime)."""
-        try:
-            from learning_mode import load_knowledge, build_knowledge_prompt
-            kb = load_knowledge()
-            return SYSTEM_PROMPT + build_knowledge_prompt(kb)
-        except Exception:
-            return SYSTEM_PROMPT
-
     def stream_chat(self, conversation_history: list) -> Generator[tuple[str, str], None, None]:
         """
-        Stream the response, yielding (emotion, text) tuples as each
-        [EMOTION:X] segment completes. Starts animating before the full
-        response is received.
+        Collect the full streamed response then parse into (emotion, text) tuples.
+
+        Accumulating before parsing is more reliable than splitting mid-stream
+        because the model may spread a tag across multiple tokens.
         """
         messages = [{"role": "system", "content": self._system_prompt()}] + conversation_history
         try:
@@ -136,7 +299,7 @@ class OllamaClient:
         except requests.exceptions.HTTPError as e:
             raise RuntimeError(f"Ollama API error: {e}")
 
-        buffer = ""
+        full_text = []
         for line in response.iter_lines():
             if not line:
                 continue
@@ -144,29 +307,23 @@ class OllamaClient:
                 token = json.loads(line).get("message", {}).get("content", "")
             except json.JSONDecodeError:
                 continue
-            buffer += token
+            full_text.append(token)
 
-            # Yield any complete segments (a segment ends when the next [EMOTION: starts)
-            while True:
-                parts = re.split(r'(?=\[EMOTION:)', buffer, maxsplit=2)
-                if len(parts) < 3:
-                    break
-                # parts[1] is a complete segment, parts[2] is the start of the next
-                match = re.match(r'\[EMOTION:(\w+)\]\s*(.+)', parts[1].strip(), re.DOTALL)
-                if match:
-                    yield (match.group(1).lower(), match.group(2).strip())
-                buffer = parts[2]
+        raw = "".join(full_text).strip()
+        if not raw:
+            yield ("neutral", "...")
+            return
 
-        # Yield any remaining segment after the stream ends
-        if buffer.strip():
-            match = re.match(r'\[EMOTION:(\w+)\]\s*(.+)', buffer.strip(), re.DOTALL)
-            if match:
-                yield (match.group(1).lower(), match.group(2).strip())
-            elif not buffer.strip().startswith("[EMOTION:"):
-                yield ("neutral", buffer.strip())
+        segments = _parse_segments(raw)
+        if not segments:
+            yield ("neutral", raw)
+            return
+
+        for emotion, text in segments:
+            if text:
+                yield (emotion, text)
 
     def trim_history(self, history: list) -> list:
-        """Keep history within max_history messages (preserves pairs)."""
         if len(history) > self.max_history:
             return history[-self.max_history:]
         return history

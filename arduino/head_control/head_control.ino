@@ -1,96 +1,70 @@
-// ============================================================
-//  head_control.ino
-//  Animatronic Head — Servo Controller
-//
-//  Receives single-character commands over Serial:
-//    M<angle>  — mouth servo   (pin 9)
-//    U<angle>  — eyes up/down  (pin 10)
-//    L<angle>  — eyes left/right (pin 11)
-//    R         — reset all to neutral
-//
-//  Example: "M60\n"  opens mouth
-//           "U75\n"  eyes look up
-//           "L120\n" eyes look right
-//
-//  TEST_MODE: uncomment the line below to echo commands without
-//  moving servos. Useful when no servos are physically connected.
-// ============================================================
+#define TEST_MODE // Comment this line out to enable physical servos
 
 #include <Servo.h>
 
-Servo mouthServo;
-Servo eyesUD;
-Servo eyesLR;
+Servo mouthServo, eyesUD, eyesLR;
 
-// Startup neutral positions — adjust to match your build
+// Positions
 const int MOUTH_CLOSED = 90;
-const int EYES_UD_CENTER = 90;
-const int EYES_LR_CENTER = 90;
+int currentMouthPos = MOUTH_CLOSED;
+int targetMouthPos = MOUTH_CLOSED;
+
+// Smoothing
+unsigned long lastMouthUpdate = 0;
+const int mouthStepSpeed = 5; 
+const int updateInterval = 15;
 
 void setup() {
-#ifndef TEST_MODE
-  mouthServo.attach(9);
-  eyesUD.attach(10);
-  eyesLR.attach(11);
-
-  mouthServo.write(MOUTH_CLOSED);
-  eyesUD.write(EYES_UD_CENTER);
-  eyesLR.write(EYES_LR_CENTER);
-#endif
-
   Serial.begin(9600);
-  delay(100);
-  while (Serial.available()) Serial.read();
+  
+  #ifndef TEST_MODE
+    mouthServo.attach(9);
+    eyesUD.attach(10);
+    eyesLR.attach(11);
+    mouthServo.write(MOUTH_CLOSED);
+  #else
+    Serial.println("--- RUNNING IN TEST MODE (NO SERVOS) ---");
+  #endif
+
   Serial.println("HEAD_READY");
 }
 
 void loop() {
-  if (!Serial.available()) return;
+  // 1. Listen for Commands
+  if (Serial.available() > 0) {
+    char cmd = Serial.read();
+    int angle = Serial.parseInt();
+    angle = constrain(angle, 0, 180);
 
-  char cmd = Serial.read();
-  int angle = Serial.parseInt();
-  angle = constrain(angle, 0, 180);
-
-  // Log raw received command
-  Serial.print(">> ");
-  Serial.print(cmd);
-  if (cmd != 'R') Serial.print(angle);
-  Serial.println();
-
-  switch (cmd) {
-    case 'M':
-#ifndef TEST_MODE
-      mouthServo.write(angle);
-#endif
-      Serial.print("M:");
-      Serial.println(angle);
-      break;
-    case 'U':
-#ifndef TEST_MODE
-      eyesUD.write(angle);
-#endif
-      Serial.print("U:");
-      Serial.println(angle);
-      break;
-    case 'L':
-#ifndef TEST_MODE
-      eyesLR.write(angle);
-#endif
-      Serial.print("L:");
-      Serial.println(angle);
-      break;
-    case 'R':
-#ifndef TEST_MODE
-      mouthServo.write(MOUTH_CLOSED);
-      eyesUD.write(EYES_UD_CENTER);
-      eyesLR.write(EYES_LR_CENTER);
-#endif
-      Serial.println("RESET");
-      break;
-    default:
-      break;
+    if (cmd == 'M') {
+      targetMouthPos = angle;
+      #ifdef TEST_MODE
+        Serial.print("TEST: Mouth targeting "); Serial.println(angle);
+      #endif
+    } else if (cmd == 'R') {
+      targetMouthPos = MOUTH_CLOSED;
+      #ifndef TEST_MODE
+        eyesUD.write(90); eyesLR.write(90);
+      #endif
+    }
+    
+    while (Serial.available() && Serial.peek() < '0') Serial.read();
   }
 
-  // Flush any remaining bytes (e.g. newline)
-  while (Serial.available() && Serial.peek() < '0') Serial.read();
+  // 2. The Smoothing Logic
+  if (millis() - lastMouthUpdate >= updateInterval) {
+    if (currentMouthPos != targetMouthPos) {
+      // Step calculation
+      if (abs(currentMouthPos - targetMouthPos) <= mouthStepSpeed) {
+        currentMouthPos = targetMouthPos;
+      } else {
+        currentMouthPos += (currentMouthPos < targetMouthPos) ? mouthStepSpeed : -mouthStepSpeed;
+      }
+
+      #ifndef TEST_MODE
+        mouthServo.write(currentMouthPos);
+      #endif
+    }
+    lastMouthUpdate = millis();
+  }
 }

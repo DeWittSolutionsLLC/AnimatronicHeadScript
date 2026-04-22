@@ -8,7 +8,8 @@ Supports two engines (set tts.engine in settings.json):
   "edge-tts" — Microsoft neural voices, requires internet
                pip install edge-tts pygame
 
-Mouth angle scales with phonetic content of each word for natural animation.
+Jaw movement uses per-phoneme open angles derived from word boundary
+events supplied by edge-tts, giving accurate lip-sync timing.
 """
 
 import os
@@ -35,7 +36,6 @@ class TTSEngine:
     def __init__(self, serial_controller=None):
         self._serial   = serial_controller
         self._pygame   = None
-        self._engine   = None
         self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
         self._load_config()
         self._init_engine()
@@ -43,15 +43,15 @@ class TTSEngine:
     def _load_config(self):
         cfg = _load_tts_config()
         self._engine_type  = cfg.get("engine",        "pyttsx3")
-        self._open_angle   = cfg.get("open_angle",    60)
+        self._open_angle   = cfg.get("open_angle",    130)
         self._closed_angle = cfg.get("closed_angle",  90)
-        self._word_ms      = cfg.get("word_open_ms",  80)
+        self._word_ms      = cfg.get("word_open_ms",  100)
         self._rate         = cfg.get("rate",          150)
         self._volume       = cfg.get("volume",        1.0)
         self._voice_index  = cfg.get("voice_index",   0)
-        self._edge_voice   = cfg.get("edge_voice",    "en-US-AndrewNeural")
+        self._edge_voice   = cfg.get("edge_voice",    "en-US-EricNeural")
         self._edge_rate    = cfg.get("edge_rate",     "-5%")
-        self._edge_pitch   = cfg.get("edge_pitch",    "-3Hz")
+        self._edge_pitch   = cfg.get("edge_pitch",    "-35Hz")
 
     def _init_engine(self):
         if self._engine_type == "edge-tts":
@@ -94,12 +94,7 @@ class TTSEngine:
     # ── Public API ────────────────────────────────────────────────────────────
 
     def prefetch(self, text: str) -> "concurrent.futures.Future | None":
-        """Start downloading TTS audio in the background. Returns a Future.
-
-        Call this as soon as you have the text. Pass the returned Future to
-        speak() so playback begins the moment the download finishes rather than
-        waiting until speak() is called.
-        """
+        """Start downloading TTS audio in the background. Returns a Future."""
         if self._engine_type != "edge-tts":
             return None
         return self._executor.submit(self._download_edge, text)
@@ -110,7 +105,7 @@ class TTSEngine:
             if self._engine_type == "edge-tts":
                 if future is None:
                     future = self.prefetch(text)
-                result = future.result()  # blocks only if download isn't done yet
+                result = future.result()
                 if result:
                     self._play_edge(*result)
             else:
@@ -131,33 +126,67 @@ class TTSEngine:
         else:
             print("  Voice listing only supported with pyttsx3 engine.")
 
-    # ── Shared helpers ────────────────────────────────────────────────────────
+    # ── Jaw angle calculation ─────────────────────────────────────────────────
 
-    _VOWEL_OPEN = {'a': 1.0, 'o': 0.9, 'e': 0.65, 'i': 0.45, 'u': 0.40, 'y': 0.30}
+    _PHONEME_OPEN: dict[str, float] = {
+        # Vowels
+        'a': 1.00, 'â': 1.00,
+        'o': 0.85,
+        'e': 0.65, 'é': 0.65,
+        'i': 0.35,
+        'u': 0.30,
+        # Approximants / liquids
+        'l': 0.45, 'r': 0.45,
+        'w': 0.40, 'y': 0.35,
+        # Fricatives
+        'f': 0.30, 'v': 0.30,
+        's': 0.25, 'z': 0.25,
+        'h': 0.50,
+        # Plosives
+        'p': 0.00, 'b': 0.00,
+        't': 0.10, 'd': 0.10,
+        'k': 0.10, 'g': 0.10,
+        # Nasals
+        'm': 0.05, 'n': 0.10,
+    }
+    _DEFAULT_CONSONANT_OPEN = 0.20
 
-    def _word_angle(self, word: str) -> int:
-        clean = word.lower().strip(".,!?;:'\"()-")
+    def _char_openness(self, ch: str) -> float:
+        return self._PHONEME_OPEN.get(ch.lower(), self._DEFAULT_CONSONANT_OPEN)
+
+    def _word_openness(self, word: str) -> float:
+        clean = word.lower().strip(".,!?;:'\"()-—…")
         if not clean:
-            return self._closed_angle
-        peak  = max((self._VOWEL_OPEN.get(ch, 0.2) for ch in clean if ch.isalpha()), default=0.2)
-        nudge = ((sum(ord(c) for c in clean) % 17) - 8) / 100.0
-        t     = max(0.35, min(1.0, peak + nudge))
-        return int(self._closed_angle - (self._closed_angle - self._open_angle) * t)
+            return 0.0
+        return max(self._char_openness(ch) for ch in clean if ch.isalpha()) if any(
+            ch.isalpha() for ch in clean) else 0.0
 
-    def _animate_mouth(self, words: list, stop_event: threading.Event):
-        word_ms          = self._word_ms / 1000.0
-        seconds_per_word = 60.0 / max(self._rate, 1)
-        serial           = self._serial
-        for word in words:
-            if stop_event.is_set():
-                break
-            serial.mouth(self._word_angle(word))
-            time.sleep(word_ms)
-            serial.mouth(self._closed_angle)
-            gap = seconds_per_word - word_ms
-            if gap > 0:
-                stop_event.wait(gap)
-        serial.mouth(self._closed_angle)
+    def _jaw_angle(self, openness: float) -> int:
+        openness = max(0.0, min(1.0, openness))
+        return int(self._closed_angle + (self._open_angle - self._closed_angle) * openness)
+
+    def _jaw_sequence(self, word: str) -> list[tuple[int, float]]:
+        clean = word.lower().strip(".,!?;:'\"()-—…")
+        word_ms = self._word_ms / 1000.0
+
+        first_alpha = next((c for c in clean if c.isalpha()), "")
+        is_plosive_start = first_alpha in "pbtdkg"
+
+        openness = self._word_openness(word)
+        peak     = self._jaw_angle(openness)
+        closed   = self._closed_angle
+
+        if is_plosive_start and openness > 0.1:
+            return [
+                (closed, word_ms * 0.15),
+                (peak,   word_ms * 0.50),
+                (closed, word_ms * 0.35),
+            ]
+        else:
+            return [
+                (peak,   word_ms * 0.60),
+                (closed, word_ms * 0.40),
+            ]
 
     # ── pyttsx3 path ──────────────────────────────────────────────────────────
 
@@ -170,11 +199,23 @@ class TTSEngine:
         )
         subprocess.run([sys.executable, "-c", code], check=False)
 
+    def _animate_mouth_words(self, words: list, stop_event: threading.Event):
+        serial = self._serial
+        for word in words:
+            if stop_event.is_set():
+                break
+            for angle, hold in self._jaw_sequence(word):
+                if stop_event.is_set():
+                    break
+                serial.mouth(angle)
+                time.sleep(hold)
+        serial.mouth(self._closed_angle)
+
     def _speak_with_mouth(self, text: str):
         words      = text.split()
         stop_event = threading.Event()
         anim       = threading.Thread(
-            target=self._animate_mouth, args=(words, stop_event), daemon=True
+            target=self._animate_mouth_words, args=(words, stop_event), daemon=True
         )
         anim.start()
         self._run_pyttsx3_subprocess(text)
@@ -185,27 +226,23 @@ class TTSEngine:
     # ── edge-tts path ─────────────────────────────────────────────────────────
 
     def _download_edge(self, text: str):
-        """Download edge-tts audio synchronously. Returns (tmp_path, word_events) or None."""
+        """Download edge-tts audio. Returns (tmp_path, word_events) or None."""
         import asyncio
         import warnings
-        if sys.platform == "win32":
-            loop = asyncio.ProactorEventLoop()
-        else:
-            loop = asyncio.new_event_loop()
+        loop = asyncio.ProactorEventLoop() if sys.platform == "win32" else asyncio.new_event_loop()
         try:
             return loop.run_until_complete(self._download_edge_async(text))
         except Exception as e:
             print(f"[tts] download error: {e}")
             return None
         finally:
-            # Drain pending callbacks so the loop closes without unclosed-socket warnings.
             try:
                 loop.run_until_complete(loop.shutdown_asyncgens())
                 loop.run_until_complete(asyncio.sleep(0))
             except Exception:
                 pass
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", ResourceWarning)
+            with __import__("warnings").catch_warnings():
+                __import__("warnings").simplefilter("ignore", ResourceWarning)
                 loop.close()
 
     async def _download_edge_async(self, text: str):
@@ -230,13 +267,17 @@ class TTSEngine:
                 audio_bytes += len(chunk["data"])
             elif chunk["type"] == "WordBoundary":
                 word_events.append({
-                    "offset_ms": chunk["offset"] / 10000,
-                    "word":      chunk["text"],
+                    "offset_ms":   chunk["offset"] / 10000,
+                    "duration_ms": chunk.get("duration", 0) / 10000,
+                    "word":        chunk["text"],
                 })
 
         if audio_bytes == 0:
             print("[tts] edge-tts returned no audio — check internet and voice name")
-            os.unlink(tmp_path)
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
             return None
 
         if not word_events:
@@ -245,35 +286,70 @@ class TTSEngine:
             if words_list:
                 ms_per_word = duration_ms / len(words_list)
                 for i, w in enumerate(words_list):
-                    word_events.append({"offset_ms": i * ms_per_word, "word": w})
+                    word_events.append({
+                        "offset_ms":   i * ms_per_word,
+                        "duration_ms": ms_per_word * 0.8,
+                        "word":        w,
+                    })
 
         return (tmp_path, word_events)
 
+    def _estimate_duration_ms(self, tmp_path: str) -> float:
+        try:
+            return (os.path.getsize(tmp_path) / 3000.0) * 1000 + 3000
+        except OSError:
+            return 15000
+
     def _play_edge(self, tmp_path: str, word_events: list):
-        """Play a pre-downloaded edge-tts audio file with jaw animation."""
-        pygame     = self._pygame
-        word_ms    = self._word_ms / 1000.0
-        serial_lead_ms = 80
-        stop_event = threading.Event()
+        """
+        Play pre-downloaded audio with accurate jaw animation.
+        """
+        pygame         = self._pygame
+        serial_lead_ms = 60
+        stop_event     = threading.Event()
 
         def animate():
+            # Wait for playback to start (1 s timeout)
+            deadline = time.time() + 1.0
             while not stop_event.is_set() and not pygame.mixer.music.get_busy():
+                if time.time() > deadline:
+                    return
                 time.sleep(0.005)
             if stop_event.is_set():
                 return
-            start_ms = time.time() * 1000
-            word_idx = 0
-            while not stop_event.is_set():
-                current_ms = time.time() * 1000 - start_ms
-                while (word_idx < len(word_events) and
-                       word_events[word_idx]["offset_ms"] - serial_lead_ms <= current_ms):
-                    if self._serial and self._serial.is_connected():
-                        self._serial.mouth(self._word_angle(word_events[word_idx]["word"]))
-                        time.sleep(word_ms)
-                        self._serial.mouth(self._closed_angle)
-                    word_idx += 1
-                time.sleep(0.005)
 
+            start_s  = time.time()
+            word_idx = 0
+
+            while not stop_event.is_set() and word_idx < len(word_events):
+                current_ms = (time.time() - start_s) * 1000
+                ev = word_events[word_idx]
+
+                if current_ms >= ev["offset_ms"] - serial_lead_ms:
+                    word      = ev["word"]
+                    seq       = self._jaw_sequence(word)
+                    spoken_ms = ev.get("duration_ms", 0)
+                    if spoken_ms > 20:
+                        total_planned = sum(h for _, h in seq) * 1000
+                        scale = spoken_ms / max(total_planned, 1)
+                    else:
+                        scale = 1.0
+
+                    for angle, hold in seq:
+                        if stop_event.is_set():
+                            break
+                        if self._serial and self._serial.is_connected():
+                            self._serial.mouth(angle)
+                        time.sleep(hold * scale)
+
+                    word_idx += 1
+                else:
+                    time.sleep(0.005)
+
+            if self._serial and self._serial.is_connected():
+                self._serial.mouth(self._closed_angle)
+
+        # ── Playback ──────────────────────────────────────────────────────────
         pygame.mixer.music.stop()
         pygame.mixer.music.unload()
         pygame.mixer.music.load(tmp_path)
@@ -283,11 +359,20 @@ class TTSEngine:
         anim.start()
         pygame.mixer.music.play()
 
-        deadline = time.time() + 1.0
-        while not pygame.mixer.music.get_busy() and time.time() < deadline:
-            time.sleep(0.005)
+        # Give pygame up to 1 s to actually start
+        t0 = time.time()
+        while not pygame.mixer.music.get_busy() and time.time() - t0 < 1.0:
+            time.sleep(0.01)   # FIXED: was pygame.time.wait(10)
+
+        # Wait for finish with hard timeout
+        timeout_ms = self._estimate_duration_ms(tmp_path)
+        play_start = time.time()
         while pygame.mixer.music.get_busy():
-            time.sleep(0.01)
+            if (time.time() - play_start) * 1000 > timeout_ms:
+                print("[tts] playback timeout — forcing stop")
+                pygame.mixer.music.stop()
+                break
+            time.sleep(0.02)   # FIXED: was pygame.time.wait(20)
 
         stop_event.set()
         anim.join(timeout=1.0)
