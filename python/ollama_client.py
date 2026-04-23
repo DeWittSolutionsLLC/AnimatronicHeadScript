@@ -200,6 +200,7 @@ class OllamaClient:
         self.model       = cfg.get("model",       "llama3.2")
         self.max_tokens  = cfg.get("max_tokens",  300)
         self.max_history = cfg.get("max_history", 20)
+        self.num_ctx     = cfg.get("num_ctx",     16384)
 
     # ── Knowledge base ────────────────────────────────────────────────────────
 
@@ -234,7 +235,7 @@ class OllamaClient:
                     "model":    self.model,
                     "messages": messages,
                     "stream":   False,
-                    "options":  {"num_predict": self.max_tokens},
+                    "options":  {"num_predict": self.max_tokens, "num_ctx": self.num_ctx},
                 },
                 timeout=60,
             )
@@ -259,7 +260,7 @@ class OllamaClient:
                     "model":    self.model,
                     "messages": [{"role": "user", "content": prompt}],
                     "stream":   False,
-                    "options":  {"num_predict": 2000},
+                    "options":  {"num_predict": 2000, "num_ctx": self.num_ctx},
                 },
                 timeout=90,
             )
@@ -283,7 +284,7 @@ class OllamaClient:
                     "model":    self.model,
                     "messages": messages,
                     "stream":   True,
-                    "options":  {"num_predict": self.max_tokens},
+                    "options":  {"num_predict": self.max_tokens, "num_ctx": self.num_ctx},
                 },
                 stream=True,
                 timeout=60,

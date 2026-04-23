@@ -10,7 +10,8 @@
     "url": "http://localhost:11434/api/chat",
     "model": "llama3.2",
     "max_tokens": 150,
-    "max_history": 20
+    "max_history": 20,
+    "num_ctx": 16384
   },
   "tts": {
     "engine": "edge-tts",
