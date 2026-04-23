@@ -9,9 +9,9 @@
   "ollama": {
     "url": "http://localhost:11434/api/chat",
     "model": "llama3.2",
-    "max_tokens": 150,
-    "max_history": 20,
-    "num_ctx": 16384
+    "max_tokens": 120,
+    "max_history": 8,
+    "num_ctx": 4096
   },
   "tts": {
     "engine": "edge-tts",

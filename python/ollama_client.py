@@ -55,6 +55,50 @@ def _load_knowledge_base() -> dict:
         return {}
 
 
+def _build_knowledge_prompt(kb: dict) -> str:
+    if not kb:
+        return ""
+
+    sections = ["\n\n--- KNOWLEDGE BASE ---"]
+
+    quotes = [q for q in kb.get("quotes", []) if isinstance(q, str) and q.strip()]
+    if quotes:
+        sections.append("CANONICAL QUOTES (use for tone/style reference):")
+        for q in quotes:
+            sections.append(f"  • {q.strip()}")
+
+    traits = [t for t in kb.get("traits", []) if isinstance(t, str) and t.strip()]
+    if traits:
+        sections.append("\nPERSONALITY TRAITS:")
+        for t in traits:
+            sections.append(f"  • {t.strip()}")
+
+    refs = [r for r in kb.get("references", []) if isinstance(r, str) and r.strip()]
+    if refs:
+        sections.append("\nPOP-CULTURE / INTERNET REFERENCES (mock humanity with these):")
+        for r in refs:
+            sections.append(f"  • {r.strip()}")
+
+    sessions = kb.get("sessions")
+    if isinstance(sessions, int):
+        sections.append(f"\nSESSIONS LOGGED: {sessions}")
+
+    known_keys = {"quotes", "traits", "references", "sessions", "used_queries"}
+    for key, value in kb.items():
+        if key in known_keys:
+            continue
+        label = key.upper().replace("_", " ")
+        if isinstance(value, list):
+            items = [str(v) for v in value if str(v).strip()]
+            if items:
+                sections.append(f"\n{label}:")
+                for item in items:
+                    sections.append(f"  • {item}")
+        elif isinstance(value, (str, int, float, bool)):
+            sections.append(f"\n{label}: {value}")
+
+    sections.append("--- END KNOWLEDGE BASE ---")
+    return "\n".join(sections)
 
 
 # ── Emotion tag normaliser ────────────────────────────────────────────────────
@@ -122,50 +166,7 @@ class OllamaClient:
         self._kb_mtime: float = 0.0
         self._kb_prompt: str  = ""
         self.reload_config()
-    def _build_knowledge_prompt(kb: dict) -> str:
-    if not kb:
-        return ""
 
-    sections = ["\n\n--- KNOWLEDGE BASE ---"]
-
-    quotes = [q for q in kb.get("quotes", []) if isinstance(q, str) and q.strip()]
-    if quotes:
-        sections.append("CANONICAL QUOTES (use for tone/style reference):")
-        for q in quotes:
-            sections.append(f"  • {q.strip()}")
-
-    traits = [t for t in kb.get("traits", []) if isinstance(t, str) and t.strip()]
-    if traits:
-        sections.append("\nPERSONALITY TRAITS:")
-        for t in traits:
-            sections.append(f"  • {t.strip()}")
-
-    refs = [r for r in kb.get("references", []) if isinstance(r, str) and r.strip()]
-    if refs:
-        sections.append("\nPOP-CULTURE / INTERNET REFERENCES (mock humanity with these):")
-        for r in refs:
-            sections.append(f"  • {r.strip()}")
-
-    sessions = kb.get("sessions")
-    if isinstance(sessions, int):
-        sections.append(f"\nSESSIONS LOGGED: {sessions}")
-
-    known_keys = {"quotes", "traits", "references", "sessions", "used_queries"}
-    for key, value in kb.items():
-        if key in known_keys:
-            continue
-        label = key.upper().replace("_", " ")
-        if isinstance(value, list):
-            items = [str(v) for v in value if str(v).strip()]
-            if items:
-                sections.append(f"\n{label}:")
-                for item in items:
-                    sections.append(f"  • {item}")
-        elif isinstance(value, (str, int, float, bool)):
-            sections.append(f"\n{label}: {value}")
-
-    sections.append("--- END KNOWLEDGE BASE ---")
-    return "\n".join(sections)
     def reload_config(self):
         cfg = _load_ollama_config()
         self.url         = cfg.get("url",         "http://localhost:11434/api/chat")
