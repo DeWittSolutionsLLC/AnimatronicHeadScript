@@ -180,7 +180,11 @@ def on_start_learning():
 
     def _report(msg):
         socketio.emit("learning_log", {"msg": msg})
-        socketio.emit("knowledge_update", load_knowledge())
+        # Only push a knowledge_update when a session finishes with new data,
+        # not on every intermediate log line (searching, processing, etc.).
+        if "complete" in msg and ("+1" in msg or any(
+                f"+{n}" in msg for n in range(2, 20))):
+            socketio.emit("knowledge_update", load_knowledge())
 
     _learning_thread = threading.Thread(
         target=run_continuous,

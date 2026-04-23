@@ -1,6 +1,7 @@
 /**
  * neural.js — 3D knowledge graph using Three.js
- * Nodes = knowledge items, clustered by category, connected by lines.
+ * Nodes = knowledge items, added incrementally as the AI learns.
+ * New nodes grow from zero and pulse; existing nodes are never moved.
  */
 
 (function () {
@@ -42,23 +43,27 @@
   scene.add(redLight);
 
   // Background particles
-  const starGeo  = new THREE.BufferGeometry();
+  const starGeo   = new THREE.BufferGeometry();
   const starVerts = [];
   for (let i = 0; i < 1200; i++) {
-    starVerts.push((Math.random() - 0.5) * 120,
-                   (Math.random() - 0.5) * 120,
-                   (Math.random() - 0.5) * 120);
+    starVerts.push(
+      (Math.random() - 0.5) * 120,
+      (Math.random() - 0.5) * 120,
+      (Math.random() - 0.5) * 120
+    );
   }
   starGeo.setAttribute("position", new THREE.Float32BufferAttribute(starVerts, 3));
   scene.add(new THREE.Points(starGeo,
     new THREE.PointsMaterial({ color: 0x223344, size: 0.18 })));
 
-  // Node/edge tracking
-  const nodeObjects = {};  // id → { mesh, pulseT }
-  const edges       = [];  // Line objects
-  let   knowledgeData = null;
+  // Graph state
+  const nodeObjects = {};  // id  → { mesh, pulseT, spawnT }
+  const edges       = [];  // Three.Line objects (kept for future cleanup)
+  const graphItems  = {};  // cat.key → Set<string> of item texts already in graph
+  let   totalNodeCount = 0;
 
-  function makeNodeMaterial(color, opacity = 1) {
+  function makeNodeMaterial(color, opacity) {
+    opacity = opacity === undefined ? 1 : opacity;
     return new THREE.MeshPhongMaterial({
       color,
       emissive: color,
@@ -79,80 +84,85 @@
     ];
   }
 
-  function buildGraph(kb) {
-    // Remove old nodes and edges
-    Object.values(nodeObjects).forEach(n => scene.remove(n.mesh));
-    edges.forEach(e => scene.remove(e));
-    edges.length = 0;
-    Object.keys(nodeObjects).forEach(k => delete nodeObjects[k]);
+  // Add an edge line between two positions
+  function addEdge(posA, posB, color) {
+    const points = [new THREE.Vector3(...posA), new THREE.Vector3(...posB)];
+    const geo    = new THREE.BufferGeometry().setFromPoints(points);
+    const mat    = new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.18 });
+    const line   = new THREE.Line(geo, mat);
+    scene.add(line);
+    edges.push(line);
+  }
 
-    const catPositions = {};
-    let totalNodes = 0;
-
+  /**
+   * ensureItems — idempotent incremental update.
+   * Adds any KB items not yet in the graph; skips existing ones.
+   * New nodes spawn from scale 0 with a birth pulse.
+   */
+  function ensureItems(kb) {
     CATEGORIES.forEach(cat => {
-      const items = (kb[cat.key] || []).filter(s => typeof s === "string" && s.trim());
+      if (!graphItems[cat.key]) graphItems[cat.key] = new Set();
+      const existing = graphItems[cat.key];
 
-      // Category hub node (larger)
-      const geo  = new THREE.SphereGeometry(0.45, 16, 16);
-      const mat  = makeNodeMaterial(cat.color);
-      const mesh = new THREE.Mesh(geo, mat);
-      mesh.position.set(...cat.pos);
-      mesh.userData = { label: cat.label, category: true, color: cat.color };
-      scene.add(mesh);
-      nodeObjects[`cat_${cat.key}`] = { mesh, pulseT: 0 };
-      catPositions[cat.key] = cat.pos;
+      // Hub node — created once, never moved
+      const hubId = "cat_" + cat.key;
+      if (!nodeObjects[hubId]) {
+        const geo  = new THREE.SphereGeometry(0.45, 16, 16);
+        const mesh = new THREE.Mesh(geo, makeNodeMaterial(cat.color));
+        mesh.position.set(...cat.pos);
+        mesh.userData = { label: cat.label, category: true, color: cat.color };
+        scene.add(mesh);
+        nodeObjects[hubId] = { mesh, pulseT: 0 };
+      }
 
-      // Item nodes
+      const items   = (kb[cat.key] || []).filter(s => typeof s === "string" && s.trim());
+      const maxNew  = Math.max(0, 22 - existing.size);
+      const newBatch = items.filter(t => !existing.has(t)).slice(0, maxNew);
+      if (!newBatch.length) return;
+
       const clusterR = 2.0 + Math.min(items.length, 20) * 0.08;
-      items.slice(0, 22).forEach((text, i) => {
-        const pos  = scatter(cat.pos, clusterR);
-        const size = 0.13 + Math.min(text.length, 60) / 600;
-        const g2   = new THREE.SphereGeometry(size, 8, 8);
-        const m2   = makeNodeMaterial(cat.color, 0.85);
-        const mesh2 = new THREE.Mesh(g2, m2);
+      let catIdx = existing.size;
+
+      newBatch.forEach(text => {
+        existing.add(text);
+        const pos      = scatter(cat.pos, clusterR);
+        const size     = 0.13 + Math.min(text.length, 60) / 600;
+        const geo2     = new THREE.SphereGeometry(size, 8, 8);
+        const mat2     = makeNodeMaterial(cat.color, 0.85);
+        const mesh2    = new THREE.Mesh(geo2, mat2);
         mesh2.position.set(...pos);
         const shortText = text.length > 80 ? text.slice(0, 77) + "..." : text;
-        mesh2.userData = { label: shortText, category: false, color: cat.color };
+        mesh2.userData  = { label: shortText, category: false, color: cat.color };
+        mesh2.scale.setScalar(0);   // invisible until spawn animation runs
         scene.add(mesh2);
-        const id = `${cat.key}_${i}`;
-        nodeObjects[id] = { mesh: mesh2, pulseT: 0 };
-        totalNodes++;
 
-        // Edge: item → category hub
-        const points = [
-          new THREE.Vector3(...pos),
-          new THREE.Vector3(...cat.pos),
-        ];
-        const lineGeo = new THREE.BufferGeometry().setFromPoints(points);
-        const lineMat = new THREE.LineBasicMaterial({
-          color: cat.color,
-          transparent: true,
-          opacity: 0.18,
-        });
-        const line = new THREE.Line(lineGeo, lineMat);
-        scene.add(line);
-        edges.push(line);
+        const id = cat.key + "_" + catIdx++;
+        // spawnT counts down 1→0 over ~0.5s, driving scale 0→1
+        // pulseT gives a bright flash after the node reaches full size
+        nodeObjects[id] = { mesh: mesh2, pulseT: 1.8, spawnT: 1.0 };
+        totalNodeCount++;
+
+        addEdge(pos, cat.pos, cat.color);
       });
     });
 
-    // Update stats
     document.getElementById("stat-nodes").textContent =
-      `${totalNodes} nodes`;
+      totalNodeCount + " nodes";
     document.getElementById("stat-sessions").textContent =
-      `${kb.sessions || 0} sessions`;
+      (kb.sessions || 0) + " sessions";
   }
 
-  // Public: call when knowledge changes
+  // Public API
   window.neuralUpdate = function (kb) {
-    knowledgeData = kb;
-    buildGraph(kb);
+    ensureItems(kb);
   };
 
-  // Public: pulse a category's nodes briefly
+  // Pulse a category's existing nodes briefly (used by chat responses)
   window.neuralPulseCategory = function (catKey) {
-    Object.entries(nodeObjects).forEach(([id, obj]) => {
-      if (id.startsWith(catKey) || id === `cat_${catKey}`) {
-        obj.pulseT = 1.0;
+    Object.entries(nodeObjects).forEach(function (entry) {
+      var id = entry[0], obj = entry[1];
+      if (id.startsWith(catKey) || id === "cat_" + catKey) {
+        obj.pulseT = Math.max(obj.pulseT, 1.0);
       }
     });
   };
@@ -162,13 +172,13 @@
   const mouse     = new THREE.Vector2();
   const tooltip   = document.getElementById("node-tooltip");
 
-  renderer.domElement.addEventListener("mousemove", e => {
+  renderer.domElement.addEventListener("mousemove", function (e) {
     const rect = renderer.domElement.getBoundingClientRect();
     mouse.x =  ((e.clientX - rect.left)  / rect.width)  * 2 - 1;
     mouse.y = -((e.clientY - rect.top)   / rect.height)  * 2 + 1;
     raycaster.setFromCamera(mouse, camera);
 
-    const meshes = Object.values(nodeObjects).map(n => n.mesh);
+    const meshes = Object.values(nodeObjects).map(function (n) { return n.mesh; });
     const hits   = raycaster.intersectObjects(meshes);
     if (hits.length) {
       tooltip.textContent = hits[0].object.userData.label || "";
@@ -180,19 +190,27 @@
 
   // Animation loop
   const clock = new THREE.Clock();
+
   function animate() {
     requestAnimationFrame(animate);
     const dt = clock.getDelta();
 
-    // Pulse effect: scale + emissive boost
-    Object.values(nodeObjects).forEach(obj => {
+    Object.values(nodeObjects).forEach(function (obj) {
+      // Spawn animation: scale ramps from 0 → 1 as spawnT counts 1 → 0
+      const spawning = obj.spawnT !== undefined && obj.spawnT > 0;
+      if (spawning) {
+        obj.spawnT = Math.max(0, obj.spawnT - dt * 2.5);
+      }
+      const spawnScale = spawning ? (1 - obj.spawnT) : 1;
+
+      // Pulse: bright flash + over-scale
       if (obj.pulseT > 0) {
         obj.pulseT = Math.max(0, obj.pulseT - dt * 1.2);
         const t = Math.sin(obj.pulseT * Math.PI);
-        obj.mesh.scale.setScalar(1 + t * 0.6);
+        obj.mesh.scale.setScalar(spawnScale * (1 + t * 0.6));
         obj.mesh.material.emissiveIntensity = 0.4 + t * 2.5;
       } else {
-        obj.mesh.scale.setScalar(1);
+        obj.mesh.scale.setScalar(spawnScale);
         obj.mesh.material.emissiveIntensity = 0.4;
       }
     });
@@ -207,7 +225,7 @@
   animate();
 
   // Resize
-  window.addEventListener("resize", () => {
+  window.addEventListener("resize", function () {
     camera.aspect = W() / H();
     camera.updateProjectionMatrix();
     renderer.setSize(W(), H());

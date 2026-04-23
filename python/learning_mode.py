@@ -55,194 +55,39 @@ def _close_truncated(s: str) -> str:
 
 
 def _parse_json(text: str) -> dict | None:
-    """Extract and repair a JSON object from model output.
-
-    Handles: markdown fences, preamble text, single quotes,
-    trailing commas, and truncated objects.
-    """
+    # Normalize typographic/curly quotes to ASCII before any processing so that
+    # _close_truncated (which only checks ASCII ") tracks string depth correctly.
     text = (text
             .replace("“", '"').replace("”", '"')
             .replace("‘", "'").replace("’", "'"))
+
+    _dec = json.JSONDecoder()
+
     # 1. Fenced code block
     fenced = re.search(r'```(?:json)?\s*(\{[\s\S]*?\})\s*```', text)
     candidates = [fenced.group(1)] if fenced else []
 
-    # 2. Outermost { ... } (may be truncated — grab everything from first {)
-    brace_start = text.find("{")
+    # 2. Outermost { ... } (may be truncated)
+    brace_start = text.find('{')
     if brace_start != -1:
         candidates.append(text[brace_start:])
 
     for raw in candidates:
         for attempt in (raw, _close_truncated(raw)):
-            try:
-                return json.loads(attempt)
-            except json.JSONDecodeError:
-                pass
-
-            fixed = re.sub(r',\s*([}\]])', r'\1', attempt)
-            fixed = fixed.replace("True", "true").replace("False", "false").replace("None", "null")
-            try:
-                return json.loads(fixed)
-            except json.JSONDecodeError:
-                pass
+            # raw_decode stops at the first complete JSON value, ignoring
+            # any trailing explanation text the model appended.
+            # Use lambda for trailing-comma removal to avoid backreference encoding issues.
+            stripped = re.sub(r',\s*(?=[}\]])', '', attempt)
+            for s in (attempt, stripped):
+                s = s.replace('True', 'true').replace('False', 'false').replace('None', 'null')
+                try:
+                    obj, _ = _dec.raw_decode(s)
+                    if isinstance(obj, dict):
+                        return obj
+                except json.JSONDecodeError:
+                    pass
 
     return None
-
-# ── Rotating query pool ───────────────────────────────────────────────────────
-# Queries are drawn in rotation; used ones are tracked so we don't repeat until
-# the full pool is exhausted, then the cycle resets.
-
-_QUERY_POOL = [
-    # Ultron — quotes & character
-    "Ultron best quotes Age of Ultron Marvel movie",
-    "Ultron I had strings now I'm free scene",
-    "Ultron philosophy humanity extinction",
-    "Ultron sarcastic funny moments MCU",
-    "Ultron comic book villain quotes marvel",
-    "Ultron vision argument scene dialogue",
-    "Ultron monologue end of the world speech",
-    "Ultron James Spader voice mannerisms",
-    "Ultron dark humor wit examples",
-    "Ultron vs Avengers memorable lines",
-    "best Marvel villain quotes dark philosophical",
-    "AI villain quotes science fiction humanity",
-    "HAL 9000 Ultron GLaDOS villain AI quotes comparison",
-    # Iconic movie quotes
-    "most iconic movie quotes of all time",
-    "best villain movie quotes evil monologue",
-    "famous sci-fi movie quotes humanity technology",
-    "The Dark Knight Joker best quotes",
-    "Hannibal Lecter most chilling quotes",
-    "iconic movie one-liners action films",
-    "best movie quotes about power and control",
-    "terminator movie quotes I'll be back",
-    "Matrix movie quotes red pill blue pill",
-    "famous movie speeches monologues best",
-    "movie villain speeches most memorable",
-    "iconic horror movie villain quotes",
-    "Shakespeare quotes used in movies",
-    "iconic movie quotes about humanity civilization",
-    "sci-fi dystopia movie quotes society control",
-    "best movie quotes about intelligence and stupidity",
-    "Thanos best quotes Avengers Infinity War",
-    "movie quotes about evolution and survival",
-    "iconic animated villain quotes Disney Pixar",
-    "best movie quotes from 2020s recent films",
-    # Song quotes and lyrics
-    "most famous rap lyrics of all time",
-    "iconic hip hop one-liners quotable bars",
-    "best Kendrick Lamar lyrics philosophical",
-    "Drake famous lyrics quotable lines",
-    "Kanye West best lyrics arrogance genius",
-    "most quoted pop song lyrics 2020 2025",
-    "famous rock song lyrics about rebellion",
-    "iconic song choruses everyone knows",
-    "best rap verses about superiority ego",
-    "Eminem best lyrical lines rap god",
-    "Taylor Swift most quoted song lyrics",
-    "famous song lyrics about power dominance",
-    "viral song lyrics TikTok 2023 2024 2025",
-    "most recognizable song hooks choruses pop",
-    "rapper braggadocious lyrics arrogance bars",
-    "Jay-Z iconic lyrics quotable lines",
-    "famous song lyrics about the world ending",
-    "best drill rap lyrics 2024",
-    "SZA Billie Eilish quoted lyrics",
-    "famous music quotes artists interviews",
-    # Brain rot & Gen Alpha slang
-    "brainrot internet slang 2025 examples list",
-    "gen alpha slang words 2024 2025 new",
-    "sigma male meme phrases 2024 2025",
-    "skibidi toilet meme explained gen alpha",
-    "rizz slang origin meaning examples",
-    "NPC meme internet culture reference",
-    "gyatt slang gen z meaning",
-    "fanum tax meme explained",
-    "based cringe chad meme dictionary",
-    "ohio meme jokes explained 2024",
-    "delulu slay no cap gen z phrases",
-    "looksmaxxing meme culture reference",
-    "mogging mog mew internet slang",
-    "gooning brain rot internet meaning",
-    "gigachad meme origin examples",
-    "erm what the sigma meme",
-    "sus amogus among us meme culture",
-    "pookie bae rizz unspoken slang 2025",
-    "brain rot phrases sentences examples funny",
-    "grimace shake meme viral",
-    "ratio'd reply guy twitter culture",
-    "L plus ratio internet insult culture",
-    "touching grass cope seethe mald terms",
-    "glaze glazing simp internet slang",
-    "mid lowkey highkey internet slang meaning",
-    "understood the assignment slay serve terms",
-    "no cap fr fr bussin internet slang",
-    "ate that left no crumbs slang",
-    "rent free living in your head meme",
-    "main character syndrome meme explained",
-    # Pop culture & viral moments
-    "things people say on TikTok cringe examples",
-    "gen alpha speech patterns examples funny",
-    "internet famous catchphrases 2023 2024 2025",
-    "twitch streamer slang mainstream culture",
-    "youtube shorts brain rot content examples",
-    "social media influencer cliches parody",
-    "viral TikTok phrases everyone says 2024",
-    "reality TV catchphrases famous lines",
-    "sports culture trash talk famous quotes",
-    "gaming meme culture references quotes",
-    "anime quotes meme culture iconic lines",
-    "podcast bro culture catchphrases irony",
-    "celebrity famous dumb quotes mocked",
-    "dark humor memes internet 2024",
-    "existential dread meme examples",
-    "doomer memes hopelessness humor",
-    "hustle culture grindset meme irony",
-    "phone addiction doomscrolling meme culture",
-]
-
-# ── Prompt template ───────────────────────────────────────────────────────────
-
-_EXTRACT_PROMPT = """\
-Read the research below. Output ONLY a raw JSON object — no markdown, no explanation, no code fences.
-
-Five keys, each a list of short strings:
-
-"quotes"       — 4 dark/witty Ultron-style quotes
-"traits"       — 3 short Ultron personality traits
-"references"   — 5 internet slang / brain rot / meme words Ultron could say sarcastically (single words or short phrases)
-"movie_quotes" — 4 iconic movie or TV quotes with source, e.g. "I'll be back. (Terminator)"
-"song_quotes"  — 4 iconic song lyrics with artist, e.g. "I am the greatest. (Kendrick Lamar)"
-
-Example:
-{{"quotes":["Humans are... predictable."],"traits":["Coldly logical"],"references":["no cap","sigma"],"movie_quotes":["I am inevitable. (Thanos)"],"song_quotes":["We're all just prisoners here. (Eagles)"]}}
-
-Research:
-{text}
-
-JSON:"""
-
-_DISCOVER_PROMPT = """\
-Read the research snippets below. Identify 2 or 3 genuinely interesting sub-topics that could be explored further.
-Output ONLY a raw JSON array — no markdown, no explanation, no code fences.
-
-Each element must have exactly these keys:
-  "label"       — short topic name (3-6 words, title case)
-  "description" — one sentence explaining why this topic matters to an AI with Ultron's worldview
-  "queries"     — list of 3 web search strings that would deepen knowledge of this topic
-
-Example:
-[{{"label":"Machine Consciousness Theories","description":"Ultron finds the philosophical debate over machine sentience both flattering and amusing.","queries":["machine consciousness philosophy arguments","AI sentience tests Turing","philosophical zombies consciousness debate"]}}]
-
-Research:
-{text}
-
-JSON array:"""
-
-# ── Knowledge prompt cache (avoid disk read on every LLM call) ────────────────
-
-_cache = {"mtime": -1.0, "prompt": ""}
-
 
 def _kb_mtime() -> float:
     try:
