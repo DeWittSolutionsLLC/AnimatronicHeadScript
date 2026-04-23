@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ULTRON — Neural Interface</title>
+  <link rel="stylesheet" href="/css/style.css" />
+</head>
+<body>
+  <!-- Header -->
+  <header>
+    <div class="logo">U L T R O N</div>
+    <div class="status-bar">
+      <span class="status-dot" id="dot-ollama" title="Ollama"></span>
+      <span class="status-label">AI</span>
+      <span class="status-dot" id="dot-serial" title="Arduino"></span>
+      <span class="status-label">HW</span>
+      <span class="status-dot" id="dot-learning" title="Learning"></span>
+      <span class="status-label">LEARN</span>
+    </div>
+    <div class="header-controls">
+      <button id="btn-learn" class="btn-secondary">Start Learning</button>
+      <button id="btn-reset" class="btn-danger">Reset</button>
+    </div>
+  </header>
+
+  <main>
+    <!-- Neural Network Viewport -->
+    <section id="neural-panel">
+      <div id="neural-container"></div>
+      <div id="neural-legend">
+        <div class="legend-item"><span class="dot" style="background:#ff3333"></span>Ultron Quotes</div>
+        <div class="legend-item"><span class="dot" style="background:#ff7700"></span>Movie Quotes</div>
+        <div class="legend-item"><span class="dot" style="background:#cc44ff"></span>Song Lyrics</div>
+        <div class="legend-item"><span class="dot" style="background:#00aaff"></span>Traits</div>
+        <div class="legend-item"><span class="dot" style="background:#00ff99"></span>Slang</div>
+      </div>
+      <div id="node-tooltip"></div>
+      <div id="neural-stats">
+        <span id="stat-nodes">0 nodes</span>
+        <span id="stat-sessions">0 sessions</span>
+      </div>
+    </section>
+
+    <!-- Chat Panel -->
+    <section id="chat-panel">
+      <div id="messages"></div>
+
+      <!-- Audio player -->
+      <div id="audio-bar">
+        <div id="audio-label">AUDIO OUTPUT</div>
+        <audio id="audio-player" controls preload="none"></audio>
+      </div>
+
+      <!-- Learning log -->
+      <div id="learning-bar" class="hidden">
+        <div id="learning-label">NEURAL ACQUISITION</div>
+        <div id="learning-log"></div>
+      </div>
+
+      <!-- Input -->
+      <div id="input-row">
+        <input id="msg-input" type="text" placeholder="Speak to Ultron..." autocomplete="off" />
+        <button id="btn-send">SEND</button>
+      </div>
+    </section>
+  </main>
+
+  <!-- Scripts -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+  <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+  <script src="/js/neural.js"></script>
+  <script src="/js/app.js"></script>
+</body>
+</html>

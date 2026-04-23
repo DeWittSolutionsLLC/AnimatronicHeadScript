@@ -33,25 +33,27 @@ def _load_tts_config() -> dict:
 
 
 class TTSEngine:
-    def __init__(self, serial_controller=None):
-        self._serial   = serial_controller
-        self._pygame   = None
-        self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+    def __init__(self, serial_controller=None, audio_ready_cb=None):
+        self._serial        = serial_controller
+        self._pygame        = None
+        self._executor      = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+        self._audio_ready_cb = audio_ready_cb
         self._load_config()
         self._init_engine()
 
     def _load_config(self):
         cfg = _load_tts_config()
-        self._engine_type  = cfg.get("engine",        "pyttsx3")
-        self._open_angle   = cfg.get("open_angle",    130)
-        self._closed_angle = cfg.get("closed_angle",  90)
-        self._word_ms      = cfg.get("word_open_ms",  100)
-        self._rate         = cfg.get("rate",          150)
-        self._volume       = cfg.get("volume",        1.0)
-        self._voice_index  = cfg.get("voice_index",   0)
-        self._edge_voice   = cfg.get("edge_voice",    "en-US-EricNeural")
-        self._edge_rate    = cfg.get("edge_rate",     "-5%")
-        self._edge_pitch   = cfg.get("edge_pitch",    "-35Hz")
+        self._engine_type    = cfg.get("engine",          "pyttsx3")
+        self._open_angle     = cfg.get("open_angle",      130)
+        self._closed_angle   = cfg.get("closed_angle",    90)
+        self._word_ms        = cfg.get("word_open_ms",    100)
+        self._rate           = cfg.get("rate",            150)
+        self._volume         = cfg.get("volume",          1.0)
+        self._voice_index    = cfg.get("voice_index",     0)
+        self._edge_voice     = cfg.get("edge_voice",      "en-US-EricNeural")
+        self._edge_rate      = cfg.get("edge_rate",       "-5%")
+        self._edge_pitch     = cfg.get("edge_pitch",      "-35Hz")
+        self._serial_lead_ms = cfg.get("serial_lead_ms",  60)
 
     def _init_engine(self):
         if self._engine_type == "edge-tts":
@@ -165,6 +167,25 @@ class TTSEngine:
         openness = max(0.0, min(1.0, openness))
         return int(self._closed_angle + (self._open_angle - self._closed_angle) * openness)
 
+    _VOWELS = set('aeiou')
+
+    def _phoneme_jaw_sequence(self, word: str, duration_ms: float) -> list[tuple[int, float]]:
+        """Per-character jaw positions weighted by phoneme type, filling the word's spoken duration."""
+        clean = word.lower().strip(".,!?;:'\"()-—…")
+        letters = [c for c in clean if c.isalpha()]
+        if not letters:
+            return [(self._closed_angle, duration_ms / 1000.0)]
+        weights    = [2.5 if ch in self._VOWELS else 1.0 for ch in letters]
+        total_w    = sum(weights)
+        speak_ms   = duration_ms * 0.82
+        close_s    = (duration_ms - speak_ms) / 1000.0
+        seq = [
+            (self._jaw_angle(self._char_openness(ch)), (speak_ms * w / total_w) / 1000.0)
+            for ch, w in zip(letters, weights)
+        ]
+        seq.append((self._closed_angle, close_s))
+        return seq
+
     def _jaw_sequence(self, word: str) -> list[tuple[int, float]]:
         clean = word.lower().strip(".,!?;:'\"()-—…")
         word_ms = self._word_ms / 1000.0
@@ -201,10 +222,11 @@ class TTSEngine:
 
     def _animate_mouth_words(self, words: list, stop_event: threading.Event):
         serial = self._serial
+        ms_per_word = (60.0 / max(self._rate, 1)) * 1000
         for word in words:
             if stop_event.is_set():
                 break
-            for angle, hold in self._jaw_sequence(word):
+            for angle, hold in self._phoneme_jaw_sequence(word, ms_per_word):
                 if stop_event.is_set():
                     break
                 serial.mouth(angle)
@@ -303,48 +325,58 @@ class TTSEngine:
     def _play_edge(self, tmp_path: str, word_events: list):
         """
         Play pre-downloaded audio with accurate jaw animation.
+        Uses absolute wall-clock fire times per word so sleep errors
+        within one word's phoneme sequence never cascade into the next.
         """
-        pygame         = self._pygame
-        serial_lead_ms = 60
-        stop_event     = threading.Event()
+        pygame     = self._pygame
+        stop_event = threading.Event()
+
+        # Clip each word's animation duration to the gap before the next word.
+        for i in range(len(word_events) - 1):
+            gap_ms = word_events[i + 1]["offset_ms"] - word_events[i]["offset_ms"]
+            word_events[i]["duration_ms"] = min(
+                word_events[i].get("duration_ms", gap_ms), gap_ms * 0.88
+            )
+
+        # Main thread sets play_wall[0] just before play(); animate thread
+        # spins briefly until the value is written, then drives jaw on wall-clock.
+        # No dependency on pygame.mixer.get_busy() so jaw works even when
+        # audio output is handled externally (e.g. browser via web server).
+        play_wall = [0.0]
 
         def animate():
-            # Wait for playback to start (1 s timeout)
+            # Wait up to 1 s for play_wall to be stamped by the main thread.
             deadline = time.time() + 1.0
-            while not stop_event.is_set() and not pygame.mixer.music.get_busy():
-                if time.time() > deadline:
-                    return
-                time.sleep(0.005)
-            if stop_event.is_set():
+            while play_wall[0] == 0.0 and time.time() < deadline:
+                time.sleep(0.002)
+            if play_wall[0] == 0.0 or stop_event.is_set():
                 return
 
-            start_s  = time.time()
-            word_idx = 0
+            t0     = play_wall[0]
+            lead_s = self._serial_lead_ms / 1000.0
 
-            while not stop_event.is_set() and word_idx < len(word_events):
-                current_ms = (time.time() - start_s) * 1000
-                ev = word_events[word_idx]
+            for ev in word_events:
+                if stop_event.is_set():
+                    break
 
-                if current_ms >= ev["offset_ms"] - serial_lead_ms:
-                    word      = ev["word"]
-                    seq       = self._jaw_sequence(word)
-                    spoken_ms = ev.get("duration_ms", 0)
-                    if spoken_ms > 20:
-                        total_planned = sum(h for _, h in seq) * 1000
-                        scale = spoken_ms / max(total_planned, 1)
-                    else:
-                        scale = 1.0
+                # Absolute wall-clock moment this word's jaw should start moving.
+                fire_at   = t0 + ev["offset_ms"] / 1000.0 - lead_s
+                remaining = fire_at - time.time()
+                if remaining > 0:
+                    time.sleep(remaining)
+                if stop_event.is_set():
+                    break
 
-                    for angle, hold in seq:
-                        if stop_event.is_set():
-                            break
-                        if self._serial and self._serial.is_connected():
-                            self._serial.mouth(angle)
-                        time.sleep(hold * scale)
+                duration_ms = ev.get("duration_ms", 0)
+                seq = (self._phoneme_jaw_sequence(ev["word"], duration_ms)
+                       if duration_ms > 20 else self._jaw_sequence(ev["word"]))
 
-                    word_idx += 1
-                else:
-                    time.sleep(0.005)
+                for angle, hold in seq:
+                    if stop_event.is_set():
+                        break
+                    if self._serial and self._serial.is_connected():
+                        self._serial.mouth(angle)
+                    time.sleep(hold)
 
             if self._serial and self._serial.is_connected():
                 self._serial.mouth(self._closed_angle)
@@ -357,14 +389,23 @@ class TTSEngine:
 
         anim = threading.Thread(target=animate, daemon=True)
         anim.start()
-        pygame.mixer.music.play()
 
-        # Give pygame up to 1 s to actually start
+        if self._audio_ready_cb:
+            try:
+                self._audio_ready_cb(tmp_path)
+            except Exception:
+                pass
+
+        play_wall[0] = time.time()
+        try:
+            pygame.mixer.music.play()
+        except Exception:
+            pass  # no local audio device — browser handles playback
+
         t0 = time.time()
         while not pygame.mixer.music.get_busy() and time.time() - t0 < 1.0:
-            time.sleep(0.01)   # FIXED: was pygame.time.wait(10)
+            time.sleep(0.01)
 
-        # Wait for finish with hard timeout
         timeout_ms = self._estimate_duration_ms(tmp_path)
         play_start = time.time()
         while pygame.mixer.music.get_busy():
@@ -372,7 +413,7 @@ class TTSEngine:
                 print("[tts] playback timeout — forcing stop")
                 pygame.mixer.music.stop()
                 break
-            time.sleep(0.02)   # FIXED: was pygame.time.wait(20)
+            time.sleep(0.02)
 
         stop_event.set()
         anim.join(timeout=1.0)

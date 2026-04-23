@@ -216,13 +216,12 @@ class OllamaClient:
 
     def _system_prompt(self) -> str:
         self._refresh_knowledge()
-        extra = ""
         try:
             from learning_mode import load_knowledge, build_knowledge_prompt  # type: ignore
-            extra = build_knowledge_prompt(load_knowledge())
+            kb_section = build_knowledge_prompt(load_knowledge())
         except Exception:
-            pass
-        return SYSTEM_PROMPT + self._kb_prompt + extra
+            kb_section = self._kb_prompt  # fallback: raw knowledge without directives
+        return SYSTEM_PROMPT + kb_section
 
     # ── Public API ────────────────────────────────────────────────────────────
 
@@ -260,7 +259,7 @@ class OllamaClient:
                     "model":    self.model,
                     "messages": [{"role": "user", "content": prompt}],
                     "stream":   False,
-                    "options":  {"num_predict": 1000},
+                    "options":  {"num_predict": 2000},
                 },
                 timeout=90,
             )

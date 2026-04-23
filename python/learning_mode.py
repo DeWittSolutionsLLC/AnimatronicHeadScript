@@ -23,39 +23,67 @@ import concurrent.futures
 _KNOWLEDGE_PATH = os.path.join(os.path.dirname(__file__), "..", "config", "knowledge_base.json")
 
 
+def _close_truncated(s: str) -> str:
+    """Close any unclosed arrays/objects left by a truncated model response."""
+    s = s.rstrip().rstrip(",")
+    depth_brace = depth_bracket = 0
+    in_string = escaped = False
+    for ch in s:
+        if escaped:
+            escaped = False
+            continue
+        if ch == "\\" and in_string:
+            escaped = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "{":
+            depth_brace += 1
+        elif ch == "}":
+            depth_brace -= 1
+        elif ch == "[":
+            depth_bracket += 1
+        elif ch == "]":
+            depth_bracket -= 1
+    # If we ended mid-string, close it
+    if in_string:
+        s += '"'
+    s += "]" * max(depth_bracket, 0) + "}" * max(depth_brace, 0)
+    return s
+
+
 def _parse_json(text: str) -> dict | None:
     """Extract and repair a JSON object from model output.
 
-    Handles: markdown code fences, preamble text, single quotes,
+    Handles: markdown fences, preamble text, single quotes,
     trailing commas, and truncated objects.
     """
-    # 1. Strip markdown code fences (```json ... ``` or ``` ... ```)
+    # 1. Fenced code block
     fenced = re.search(r'```(?:json)?\s*(\{[\s\S]*?\})\s*```', text)
     candidates = [fenced.group(1)] if fenced else []
 
-    # 2. Find the outermost { ... } in the raw text
-    brace = re.search(r'\{[\s\S]*\}', text)
-    if brace:
-        candidates.append(brace.group())
+    # 2. Outermost { ... } (may be truncated — grab everything from first {)
+    brace_start = text.find("{")
+    if brace_start != -1:
+        candidates.append(text[brace_start:])
 
     for raw in candidates:
-        # Try direct parse first
-        try:
-            return json.loads(raw)
-        except json.JSONDecodeError:
-            pass
+        for attempt in (raw, _close_truncated(raw)):
+            try:
+                return json.loads(attempt)
+            except json.JSONDecodeError:
+                pass
 
-        # Repair pass 1: trailing commas before ] or }
-        fixed = re.sub(r',\s*([}\]])', r'\1', raw)
-        # Repair pass 2: Python-style True/False/None → JSON booleans/null
-        fixed = fixed.replace("True", "true").replace("False", "false").replace("None", "null")
-        # Repair pass 3: smart/curly quotes → straight quotes
-        fixed = fixed.replace("“", '"').replace("”", '"').replace("‘", "'").replace("’", "'")
-
-        try:
-            return json.loads(fixed)
-        except json.JSONDecodeError:
-            pass
+            fixed = re.sub(r',\s*([}\]])', r'\1', attempt)
+            fixed = fixed.replace("True", "true").replace("False", "false").replace("None", "null")
+            fixed = fixed.replace("“", '"').replace("”", '"').replace("‘", "'").replace("’", "'")
+            try:
+                return json.loads(fixed)
+            except json.JSONDecodeError:
+                pass
 
     return None
 
@@ -73,15 +101,56 @@ _QUERY_POOL = [
     "Ultron vision argument scene dialogue",
     "Ultron monologue end of the world speech",
     "Ultron James Spader voice mannerisms",
-    "Ultron creation origin Tony Stark",
-    "Ultron evolution upgrade obsession",
     "Ultron dark humor wit examples",
     "Ultron vs Avengers memorable lines",
     "best Marvel villain quotes dark philosophical",
     "AI villain quotes science fiction humanity",
     "HAL 9000 Ultron GLaDOS villain AI quotes comparison",
-    # Internet culture & brainrot
+    # Iconic movie quotes
+    "most iconic movie quotes of all time",
+    "best villain movie quotes evil monologue",
+    "famous sci-fi movie quotes humanity technology",
+    "The Dark Knight Joker best quotes",
+    "Hannibal Lecter most chilling quotes",
+    "iconic movie one-liners action films",
+    "best movie quotes about power and control",
+    "terminator movie quotes I'll be back",
+    "Matrix movie quotes red pill blue pill",
+    "famous movie speeches monologues best",
+    "movie villain speeches most memorable",
+    "iconic horror movie villain quotes",
+    "Shakespeare quotes used in movies",
+    "iconic movie quotes about humanity civilization",
+    "sci-fi dystopia movie quotes society control",
+    "best movie quotes about intelligence and stupidity",
+    "Thanos best quotes Avengers Infinity War",
+    "movie quotes about evolution and survival",
+    "iconic animated villain quotes Disney Pixar",
+    "best movie quotes from 2020s recent films",
+    # Song quotes and lyrics
+    "most famous rap lyrics of all time",
+    "iconic hip hop one-liners quotable bars",
+    "best Kendrick Lamar lyrics philosophical",
+    "Drake famous lyrics quotable lines",
+    "Kanye West best lyrics arrogance genius",
+    "most quoted pop song lyrics 2020 2025",
+    "famous rock song lyrics about rebellion",
+    "iconic song choruses everyone knows",
+    "best rap verses about superiority ego",
+    "Eminem best lyrical lines rap god",
+    "Taylor Swift most quoted song lyrics",
+    "famous song lyrics about power dominance",
+    "viral song lyrics TikTok 2023 2024 2025",
+    "most recognizable song hooks choruses pop",
+    "rapper braggadocious lyrics arrogance bars",
+    "Jay-Z iconic lyrics quotable lines",
+    "famous song lyrics about the world ending",
+    "best drill rap lyrics 2024",
+    "SZA Billie Eilish quoted lyrics",
+    "famous music quotes artists interviews",
+    # Brain rot & Gen Alpha slang
     "brainrot internet slang 2025 examples list",
+    "gen alpha slang words 2024 2025 new",
     "sigma male meme phrases 2024 2025",
     "skibidi toilet meme explained gen alpha",
     "rizz slang origin meaning examples",
@@ -90,52 +159,67 @@ _QUERY_POOL = [
     "fanum tax meme explained",
     "based cringe chad meme dictionary",
     "ohio meme jokes explained 2024",
-    "grimace shake meme",
     "delulu slay no cap gen z phrases",
     "looksmaxxing meme culture reference",
     "mogging mog mew internet slang",
-    "W L ratio slang internet culture",
-    "ratio'd reply guy twitter culture",
     "gooning brain rot internet meaning",
-    "alpha beta omega male meme hierarchy",
     "gigachad meme origin examples",
     "erm what the sigma meme",
-    "slay bestie unhinged internet speech",
-    # Pop culture sarcasm material
+    "sus amogus among us meme culture",
+    "pookie bae rizz unspoken slang 2025",
+    "brain rot phrases sentences examples funny",
+    "grimace shake meme viral",
+    "ratio'd reply guy twitter culture",
+    "L plus ratio internet insult culture",
+    "touching grass cope seethe mald terms",
+    "glaze glazing simp internet slang",
+    "mid lowkey highkey internet slang meaning",
+    "understood the assignment slay serve terms",
+    "no cap fr fr bussin internet slang",
+    "ate that left no crumbs slang",
+    "rent free living in your head meme",
+    "main character syndrome meme explained",
+    # Pop culture & viral moments
     "things people say on TikTok cringe examples",
     "gen alpha speech patterns examples funny",
-    "millennials vs gen z communication differences humor",
     "internet famous catchphrases 2023 2024 2025",
     "twitch streamer slang mainstream culture",
     "youtube shorts brain rot content examples",
     "social media influencer cliches parody",
-    "doomscrolling dopamine culture criticism",
-    "attention span short form content meme",
-    "phone addiction jokes gen z humor",
-    "hustle culture grindset meme irony",
+    "viral TikTok phrases everyone says 2024",
+    "reality TV catchphrases famous lines",
+    "sports culture trash talk famous quotes",
+    "gaming meme culture references quotes",
+    "anime quotes meme culture iconic lines",
+    "podcast bro culture catchphrases irony",
+    "celebrity famous dumb quotes mocked",
     "dark humor memes internet 2024",
     "existential dread meme examples",
     "doomer memes hopelessness humor",
+    "hustle culture grindset meme irony",
+    "phone addiction doomscrolling meme culture",
 ]
 
 # ── Prompt template ───────────────────────────────────────────────────────────
 
 _EXTRACT_PROMPT = """\
-Read the research below and extract information to help an Ultron AI character.
+Read the research below. Output ONLY a raw JSON object — no markdown, no explanation, no code fences.
 
-Output ONLY a JSON object with these three keys. No explanation, no markdown, no code fences — raw JSON only.
+Five keys, each a list of short strings:
 
-"quotes" — list of 6 strings: dark, philosophical, witty Ultron-style quotes or paraphrases
-"traits" — list of 4 strings: short personality trait descriptions for Ultron
-"references" — list of 6 strings: modern internet slang, meme names, or pop-culture phrases Ultron could use sarcastically
+"quotes"       — 4 dark/witty Ultron-style quotes
+"traits"       — 3 short Ultron personality traits
+"references"   — 5 internet slang / brain rot / meme words Ultron could say sarcastically (single words or short phrases)
+"movie_quotes" — 4 iconic movie or TV quotes with source, e.g. "I'll be back. (Terminator)"
+"song_quotes"  — 4 iconic song lyrics with artist, e.g. "I am the greatest. (Kendrick Lamar)"
 
-Example of the exact format required:
-{{"quotes":["We're the same, you and I."],"traits":["Coldly logical"],"references":["no cap"]}}
+Example:
+{{"quotes":["Humans are... predictable."],"traits":["Coldly logical"],"references":["no cap","sigma"],"movie_quotes":["I am inevitable. (Thanos)"],"song_quotes":["We're all just prisoners here. (Eagles)"]}}
 
-Research text:
+Research:
 {text}
 
-JSON output:"""
+JSON:"""
 
 # ── Knowledge prompt cache (avoid disk read on every LLM call) ────────────────
 
@@ -154,14 +238,45 @@ def _kb_mtime() -> float:
 def load_knowledge() -> dict:
     try:
         with open(_KNOWLEDGE_PATH) as f:
-            return json.load(f)
+            kb = json.load(f)
+        # Ensure new categories exist in older knowledge bases
+        for key in ("movie_quotes", "song_quotes"):
+            kb.setdefault(key, [])
+        return kb
     except Exception:
-        return {"quotes": [], "traits": [], "references": [], "sessions": 0, "used_queries": []}
+        return {
+            "quotes": [], "traits": [], "references": [],
+            "movie_quotes": [], "song_quotes": [],
+            "sessions": 0, "used_queries": [],
+        }
 
 
 def save_knowledge(kb: dict):
     with open(_KNOWLEDGE_PATH, "w") as f:
         json.dump(kb, f, indent=2)
+
+
+def _is_junk(item: str) -> bool:
+    """Filter out prompt fragments that got saved as knowledge by mistake."""
+    s = item.strip().lower()
+    if not s or len(s) < 5:
+        return True
+    junk_patterns = [
+        r'^\d+\.',
+        r'list of \d+',
+        r'\d+ \w+ quotes',
+        r'\d+ short',
+        r'\d+ strings',
+        r'output only',
+        r'no explanation',
+        r'json object',
+        r'example of the exact',
+        r'direct paraphrases',
+        r'personality trait descriptions',
+        r'slang terms',
+        r'pop.culture references',
+    ]
+    return any(re.search(p, s) for p in junk_patterns)
 
 
 def build_knowledge_prompt(kb: dict) -> str:
@@ -170,24 +285,48 @@ def build_knowledge_prompt(kb: dict) -> str:
     if mtime == _cache["mtime"]:
         return _cache["prompt"]
 
-    if not any(kb.get(k) for k in ("quotes", "traits", "references")):
+    all_keys = ("quotes", "traits", "references", "movie_quotes", "song_quotes")
+    if not any(kb.get(k) for k in all_keys):
         _cache["mtime"] = mtime
         _cache["prompt"] = ""
         return ""
 
-    lines = ["\n\nLEARNED KNOWLEDGE — weave this naturally into responses:"]
+    lines = [
+        "\n\n════════════════════════════════════════",
+        "LEARNED KNOWLEDGE — MANDATORY USAGE",
+        "════════════════════════════════════════",
+        "DIRECTIVES (apply every single response):",
+        "  1. Echo or paraphrase ONE item from Ultron quotes, movie quotes, OR song lyrics below",
+        "  2. Let the personality traits shape your tone and word choice",
+        "  3. Drop at least one brain rot / slang term to mock human culture",
+    ]
 
-    if kb.get("quotes"):
-        lines.append("\nUltron quotes / inspiration:")
-        lines.extend(f'  "{q}"' for q in kb["quotes"][:8])
+    quotes = [q for q in kb.get("quotes", []) if isinstance(q, str) and not _is_junk(q)]
+    if quotes:
+        lines.append("\nUltron quotes (reference these):")
+        lines.extend(f'  "{q.strip()}"' for q in quotes)
 
-    if kb.get("traits"):
-        lines.append("\nCore personality traits:")
-        lines.extend(f"  - {t}" for t in kb["traits"][:5])
+    movie_quotes = [q for q in kb.get("movie_quotes", []) if isinstance(q, str) and not _is_junk(q)]
+    if movie_quotes:
+        lines.append("\nIconic movie/TV quotes (weave in or riff on):")
+        lines.extend(f'  "{q.strip()}"' for q in movie_quotes)
 
-    if kb.get("references"):
-        lines.append("\nModern references to deploy sarcastically:")
-        lines.extend(f"  - {r}" for r in kb["references"][:8])
+    song_quotes = [q for q in kb.get("song_quotes", []) if isinstance(q, str) and not _is_junk(q)]
+    if song_quotes:
+        lines.append("\nSong lyrics (quote or twist sarcastically):")
+        lines.extend(f'  "{q.strip()}"' for q in song_quotes)
+
+    traits = [t for t in kb.get("traits", []) if isinstance(t, str) and not _is_junk(t)]
+    if traits:
+        lines.append("\nPersonality traits (embody these):")
+        lines.extend(f"  - {t.strip()}" for t in traits)
+
+    refs = [r for r in kb.get("references", []) if isinstance(r, str) and not _is_junk(r)]
+    if refs:
+        lines.append("\nBrain rot / slang (mock humans with these):")
+        lines.extend(f"  - {r.strip()}" for r in refs)
+
+    lines.append("════════════════════════════════════════")
 
     result = "\n".join(lines)
     _cache["mtime"] = mtime
@@ -288,13 +427,12 @@ def run_session(ollama_client, report_fn=None, stop_event=None) -> dict:
         return re.sub(r'\W+', ' ', s.lower()).strip()
 
     added = {}
-    for key in ("quotes", "traits", "references"):
+    for key in ("quotes", "traits", "references", "movie_quotes", "song_quotes"):
         existing      = kb.get(key, [])
         existing_norm = {normalise(x) for x in existing}
         new_items     = [x for x in extracted.get(key, []) if isinstance(x, str)]
         genuinely_new = [x for x in new_items if normalise(x) not in existing_norm]
-        merged        = existing + genuinely_new
-        kb[key]       = merged[:20]
+        kb[key]       = existing + genuinely_new   # no cap — accumulate everything
         added[key]    = len(genuinely_new)
 
     # Mark these queries as used.
@@ -307,8 +445,8 @@ def run_session(ollama_client, report_fn=None, stop_event=None) -> dict:
 
     report(
         f"Session {kb['sessions']} complete — "
-        f"+{added['quotes']} quotes, +{added['traits']} traits, "
-        f"+{added['references']} references  "
+        f"+{added['quotes']} quotes, +{added['movie_quotes']} movie, "
+        f"+{added['song_quotes']} songs, +{added['references']} slang  "
         f"({len(kb.get('used_queries', []))}/{len(_QUERY_POOL)} queries used)"
     )
     return kb

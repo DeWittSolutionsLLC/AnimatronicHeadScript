@@ -17,14 +17,15 @@
     "rate": 150,
     "volume": 1.0,
     "voice_index": 0,
-    "edge_voice": "en-US-EricNeural",
-    "edge_rate": "-5%",
-    "edge_pitch": "-35Hz"
+    "edge_voice": "en-US-ChristopherNeural",
+    "edge_rate": "+0%",
+    "edge_pitch": "-50Hz"
   },
   "mouth": {
-    "open_angle": 130,
+    "open_angle": 115,
     "closed_angle": 90,
-    "word_open_ms": 100
+    "word_open_ms": 60,
+    "serial_lead_ms": 50
   },
   "idle": {
     "enabled": true,
