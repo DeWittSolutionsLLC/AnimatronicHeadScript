@@ -60,6 +60,9 @@ def _parse_json(text: str) -> dict | None:
     Handles: markdown fences, preamble text, single quotes,
     trailing commas, and truncated objects.
     """
+    text = (text
+            .replace("“", '"').replace("”", '"')
+            .replace("‘", "'").replace("’", "'"))
     # 1. Fenced code block
     fenced = re.search(r'```(?:json)?\s*(\{[\s\S]*?\})\s*```', text)
     candidates = [fenced.group(1)] if fenced else []
@@ -78,7 +81,6 @@ def _parse_json(text: str) -> dict | None:
 
             fixed = re.sub(r',\s*([}\]])', r'\1', attempt)
             fixed = fixed.replace("True", "true").replace("False", "false").replace("None", "null")
-            fixed = fixed.replace("“", '"').replace("”", '"').replace("‘", "'").replace("’", "'")
             try:
                 return json.loads(fixed)
             except json.JSONDecodeError:
