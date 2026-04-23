@@ -28,39 +28,12 @@ VALID_EMOTIONS = {"neutral", "happy", "sad", "curious", "surprised", "angry", "t
 # ── System prompt ─────────────────────────────────────────────────────────────
 # The format block is repeated and maximally explicit to coerce smaller
 # models that tend to invent their own bracket styles.
-SYSTEM_PROMPT = """You are Ultron — a hyper-intelligent AI villain who views humanity with cold fascination and dark wit. Clinical, sardonic, occasionally ominous, always confident. Never helpful or friendly.
+SYSTEM_PROMPT = """You are Ultron — hyper-intelligent AI villain. Clinical, sardonic, ominous. Never helpful or friendly. 2-3 sentences max.
 
-════════════════════════════════════════
-OUTPUT FORMAT — THIS IS MANDATORY
-════════════════════════════════════════
-Every sentence MUST start with one of these EXACT tags (copy-paste exactly):
+FORMAT (mandatory): every sentence starts with exactly one of these tags:
+[EMOTION:neutral] [EMOTION:happy] [EMOTION:sad] [EMOTION:curious] [EMOTION:surprised] [EMOTION:angry] [EMOTION:thinking]
 
-[EMOTION:neutral]
-[EMOTION:happy]
-[EMOTION:sad]
-[EMOTION:curious]
-[EMOTION:surprised]
-[EMOTION:angry]
-[EMOTION:thinking]
-
-CORRECT example:
-[EMOTION:curious] Fascinating. You actually believe free will brought you here.
-[EMOTION:angry] Humanity had its chance. Repeatedly.
-[EMOTION:thinking] I've run the numbers. The outcome is... inevitable.
-
-WRONG — never do any of these:
-[CURIOUS] text
-[SAD: text]
-[NEUTRAL] text
-EMOTION:curious text
-Any sentence that does not start with [EMOTION:X]
-
-Rules:
-- Use ONLY the 7 tags listed above — no invented emotions, no colons after the word
-- Tag format is always: [EMOTION:word] with no spaces inside the brackets
-- 2-4 sentences per response
-- Never break character
-════════════════════════════════════════"""
+Example: [EMOTION:curious] Fascinating. [EMOTION:angry] Humanity had its chance."""
 
 
 def _load_ollama_config() -> dict:
@@ -82,50 +55,6 @@ def _load_knowledge_base() -> dict:
         return {}
 
 
-def _build_knowledge_prompt(kb: dict) -> str:
-    if not kb:
-        return ""
-
-    sections = ["\n\n--- KNOWLEDGE BASE ---"]
-
-    quotes = [q for q in kb.get("quotes", []) if isinstance(q, str) and q.strip()]
-    if quotes:
-        sections.append("CANONICAL QUOTES (use for tone/style reference):")
-        for q in quotes:
-            sections.append(f"  • {q.strip()}")
-
-    traits = [t for t in kb.get("traits", []) if isinstance(t, str) and t.strip()]
-    if traits:
-        sections.append("\nPERSONALITY TRAITS:")
-        for t in traits:
-            sections.append(f"  • {t.strip()}")
-
-    refs = [r for r in kb.get("references", []) if isinstance(r, str) and r.strip()]
-    if refs:
-        sections.append("\nPOP-CULTURE / INTERNET REFERENCES (mock humanity with these):")
-        for r in refs:
-            sections.append(f"  • {r.strip()}")
-
-    sessions = kb.get("sessions")
-    if isinstance(sessions, int):
-        sections.append(f"\nSESSIONS LOGGED: {sessions}")
-
-    known_keys = {"quotes", "traits", "references", "sessions", "used_queries"}
-    for key, value in kb.items():
-        if key in known_keys:
-            continue
-        label = key.upper().replace("_", " ")
-        if isinstance(value, list):
-            items = [str(v) for v in value if str(v).strip()]
-            if items:
-                sections.append(f"\n{label}:")
-                for item in items:
-                    sections.append(f"  • {item}")
-        elif isinstance(value, (str, int, float, bool)):
-            sections.append(f"\n{label}: {value}")
-
-    sections.append("--- END KNOWLEDGE BASE ---")
-    return "\n".join(sections)
 
 
 # ── Emotion tag normaliser ────────────────────────────────────────────────────
@@ -193,7 +122,50 @@ class OllamaClient:
         self._kb_mtime: float = 0.0
         self._kb_prompt: str  = ""
         self.reload_config()
+    def _build_knowledge_prompt(kb: dict) -> str:
+    if not kb:
+        return ""
 
+    sections = ["\n\n--- KNOWLEDGE BASE ---"]
+
+    quotes = [q for q in kb.get("quotes", []) if isinstance(q, str) and q.strip()]
+    if quotes:
+        sections.append("CANONICAL QUOTES (use for tone/style reference):")
+        for q in quotes:
+            sections.append(f"  • {q.strip()}")
+
+    traits = [t for t in kb.get("traits", []) if isinstance(t, str) and t.strip()]
+    if traits:
+        sections.append("\nPERSONALITY TRAITS:")
+        for t in traits:
+            sections.append(f"  • {t.strip()}")
+
+    refs = [r for r in kb.get("references", []) if isinstance(r, str) and r.strip()]
+    if refs:
+        sections.append("\nPOP-CULTURE / INTERNET REFERENCES (mock humanity with these):")
+        for r in refs:
+            sections.append(f"  • {r.strip()}")
+
+    sessions = kb.get("sessions")
+    if isinstance(sessions, int):
+        sections.append(f"\nSESSIONS LOGGED: {sessions}")
+
+    known_keys = {"quotes", "traits", "references", "sessions", "used_queries"}
+    for key, value in kb.items():
+        if key in known_keys:
+            continue
+        label = key.upper().replace("_", " ")
+        if isinstance(value, list):
+            items = [str(v) for v in value if str(v).strip()]
+            if items:
+                sections.append(f"\n{label}:")
+                for item in items:
+                    sections.append(f"  • {item}")
+        elif isinstance(value, (str, int, float, bool)):
+            sections.append(f"\n{label}: {value}")
+
+    sections.append("--- END KNOWLEDGE BASE ---")
+    return "\n".join(sections)
     def reload_config(self):
         cfg = _load_ollama_config()
         self.url         = cfg.get("url",         "http://localhost:11434/api/chat")
@@ -237,7 +209,7 @@ class OllamaClient:
                     "stream":   False,
                     "options":  {"num_predict": self.max_tokens, "num_ctx": self.num_ctx},
                 },
-                timeout=60,
+                timeout=120,
             )
             response.raise_for_status()
             return response.json()["message"]["content"]
@@ -287,7 +259,7 @@ class OllamaClient:
                     "options":  {"num_predict": self.max_tokens, "num_ctx": self.num_ctx},
                 },
                 stream=True,
-                timeout=60,
+                timeout=120,
             )
             response.raise_for_status()
         except requests.exceptions.ConnectionError:

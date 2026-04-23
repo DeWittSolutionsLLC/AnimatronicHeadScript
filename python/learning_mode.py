@@ -17,6 +17,7 @@ Requires: pip install ddgs
 import json
 import os
 import re
+import random
 import concurrent.futures
 
 _KNOWLEDGE_PATH = os.path.join(os.path.dirname(__file__), "..", "config", "knowledge_base.json")
@@ -160,42 +161,37 @@ def build_knowledge_prompt(kb: dict) -> str:
         _cache["prompt"] = ""
         return ""
 
-    lines = [
-        "\n\n════════════════════════════════════════",
-        "LEARNED KNOWLEDGE — MANDATORY USAGE",
-        "════════════════════════════════════════",
-        "DIRECTIVES (apply every single response):",
-        "  1. Echo or paraphrase ONE item from Ultron quotes, movie quotes, OR song lyrics below",
-        "  2. Let the personality traits shape your tone and word choice",
-        "  3. Drop at least one brain rot / slang term to mock human culture",
-    ]
+    lines = ["KNOWLEDGE (use tone and refs below):"]
 
-    quotes = [q for q in kb.get("quotes", []) if isinstance(q, str) and not _is_junk(q)]
+    def _sample(pool, n):
+        clean = [x for x in pool if isinstance(x, str) and not _is_junk(x)]
+        return random.sample(clean, min(n, len(clean)))
+
+    quotes = _sample(kb.get("quotes", []), 6)
     if quotes:
         lines.append("\nUltron quotes (reference these):")
         lines.extend(f'  "{q.strip()}"' for q in quotes)
 
-    movie_quotes = [q for q in kb.get("movie_quotes", []) if isinstance(q, str) and not _is_junk(q)]
+    movie_quotes = _sample(kb.get("movie_quotes", []), 5)
     if movie_quotes:
         lines.append("\nIconic movie/TV quotes (weave in or riff on):")
         lines.extend(f'  "{q.strip()}"' for q in movie_quotes)
 
-    song_quotes = [q for q in kb.get("song_quotes", []) if isinstance(q, str) and not _is_junk(q)]
+    song_quotes = _sample(kb.get("song_quotes", []), 5)
     if song_quotes:
         lines.append("\nSong lyrics (quote or twist sarcastically):")
         lines.extend(f'  "{q.strip()}"' for q in song_quotes)
 
-    traits = [t for t in kb.get("traits", []) if isinstance(t, str) and not _is_junk(t)]
+    traits = _sample(kb.get("traits", []), 5)
     if traits:
         lines.append("\nPersonality traits (embody these):")
         lines.extend(f"  - {t.strip()}" for t in traits)
 
-    refs = [r for r in kb.get("references", []) if isinstance(r, str) and not _is_junk(r)]
+    refs = _sample(kb.get("references", []), 7)
     if refs:
         lines.append("\nBrain rot / slang (mock humans with these):")
         lines.extend(f"  - {r.strip()}" for r in refs)
 
-    lines.append("════════════════════════════════════════")
 
     result = "\n".join(lines)
     _cache["mtime"] = mtime

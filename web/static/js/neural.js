@@ -115,18 +115,18 @@
         nodeObjects[hubId] = { mesh, pulseT: 0 };
       }
 
-      const items   = (kb[cat.key] || []).filter(s => typeof s === "string" && s.trim());
-      const maxNew  = Math.max(0, 22 - existing.size);
-      const newBatch = items.filter(t => !existing.has(t)).slice(0, maxNew);
+      const items    = (kb[cat.key] || []).filter(s => typeof s === "string" && s.trim());
+      const newBatch = items.filter(t => !existing.has(t));
       if (!newBatch.length) return;
 
-      const clusterR = 2.0 + Math.min(items.length, 20) * 0.08;
+      // Radius grows with the total category size so nodes aren't packed too tight
+      const clusterR = 2.2 + Math.min(items.length, 80) * 0.055;
       let catIdx = existing.size;
 
       newBatch.forEach(text => {
         existing.add(text);
         const pos      = scatter(cat.pos, clusterR);
-        const size     = 0.13 + Math.min(text.length, 60) / 600;
+        const size     = 0.09 + Math.min(text.length, 60) / 800;
         const geo2     = new THREE.SphereGeometry(size, 8, 8);
         const mat2     = makeNodeMaterial(cat.color, 0.85);
         const mesh2    = new THREE.Mesh(geo2, mat2);
