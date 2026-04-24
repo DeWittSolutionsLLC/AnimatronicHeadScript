@@ -21,7 +21,7 @@ from serial_controller import SerialController
 from tts_engine import TTSEngine
 from idle_animator import IdleAnimator
 import emotion_map
-from learning_mode import load_knowledge, run_continuous
+from learning_mode import load_knowledge, run_continuous, run_self_edit
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
 BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
@@ -201,6 +201,19 @@ def on_stop_learning():
     _learning_stop.set()
     emit("learning_log", {"msg": "Stopping learning mode..."})
     emit("status_update", {"learning": False})
+
+
+@socketio.on("self_edit")
+def on_self_edit():
+    def _report(msg):
+        socketio.emit("learning_log", {"msg": msg})
+
+    def _run():
+        kb = run_self_edit(llm, report_fn=_report)
+        socketio.emit("knowledge_update", kb)
+
+    threading.Thread(target=_run, daemon=True).start()
+    emit("learning_log", {"msg": "Ultron is rewriting himself..."})
 
 
 @socketio.on("reset")

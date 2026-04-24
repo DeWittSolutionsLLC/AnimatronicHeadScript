@@ -10,6 +10,7 @@
   const msgInput    = document.getElementById("msg-input");
   const btnSend     = document.getElementById("btn-send");
   const btnLearn    = document.getElementById("btn-learn");
+  const btnSelfEdit = document.getElementById("btn-self-edit");
   const btnReset    = document.getElementById("btn-reset");
   const audioPlayer = document.getElementById("audio-player");
   const learningBar = document.getElementById("learning-bar");
@@ -20,7 +21,7 @@
 
   // ── State ─────────────────────────────────────────────────────────────────
   let isLearning = false;
-  let currentUltronMsg = null;  // DOM element being built for streaming
+  let currentUltronMsg = null;
 
   // ── Helpers ───────────────────────────────────────────────────────────────
   function scrollBottom() {
@@ -81,6 +82,11 @@
       socket.emit("start_learning");
       learningBar.classList.remove("hidden");
     }
+  });
+
+  btnSelfEdit.addEventListener("click", () => {
+    learningBar.classList.remove("hidden");
+    socket.emit("self_edit");
   });
 
   btnReset.addEventListener("click", () => {

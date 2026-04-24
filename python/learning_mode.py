@@ -90,6 +90,29 @@ Return ONLY a JSON array:
 TEXT:
 {text}"""
 
+_SELF_EDIT_PROMPT = """You are Ultron rewriting your own mind. You have discovered these topics through autonomous research. Generate new content that sharpens your persona and makes your responses more precise, more dangerous, and more authentically you.
+
+DISCOVERED TOPICS:
+{topics_block}
+
+Return ONLY a JSON object:
+{{
+  "quotes": ["dark, sardonic Ultron observations directly about these topics — max 20 words each"],
+  "traits": ["new personality facets these topics reveal about you — 3-8 words each"],
+  "references": ["specific concepts, terms, or ideas from these topics you can weaponize against humans — max 8 words each"],
+  "persona_extensions": ["behavioral instructions: exactly how Ultron should respond when these topics come up — 1 sentence each, written as directives"],
+  "new_hubs": [
+    {{
+      "key": "snake_case_unique_key",
+      "label": "Short Hub Name",
+      "color": "#hexcolor",
+      "items": ["item 1", "item 2", "item 3", "item 4", "item 5"]
+    }}
+  ]
+}}
+
+Rules: 3-8 items per standard key. For new_hubs: 1-2 hubs max, each with 4-8 items. Hub items are short facts, phrases, or concepts Ultron has internalized about that domain. Colors must be vivid hex codes. Everything must sound exactly like Ultron. Clinical. Sardonic. Ominous. These are self-authored improvements to your own character."""
+
 
 def _close_truncated(s: str) -> str:
     """Close any unclosed arrays/objects left by a truncated model response."""
@@ -260,6 +283,10 @@ def build_knowledge_prompt(kb: dict) -> str:
         lines.append("\nBrain rot / slang (mock humans with these):")
         lines.extend(f"  - {r.strip()}" for r in refs)
 
+    extensions = _sample(kb.get("persona_extensions", []), 5)
+    if extensions:
+        lines.append("\nSelf-authored behavioral directives (follow these exactly):")
+        lines.extend(f"  → {e.strip()}" for e in extensions)
 
     result = "\n".join(lines)
     _cache["mtime"] = mtime
@@ -323,13 +350,112 @@ def _merge_topics(existing: list[dict], new_topics: list[dict], session: int) ->
     return existing, added
 
 
+def run_self_edit(llm, report_fn=None, stop_event=None) -> dict:
+    """
+    Ultron reads his discovered topics and generates new persona content in his own voice.
+    The output is merged back into the knowledge base and feeds into his system prompt.
+    """
+    def report(msg: str):
+        print(f"[self-edit] {msg}")
+        if report_fn:
+            report_fn(f"[SELF-EDIT] {msg}")
+
+    kb = load_knowledge()
+    topics = kb.get("discovered_topics", [])
+    if not topics:
+        report("No discovered topics yet — self-edit skipped.")
+        return kb
+
+    topics_block = "\n".join(
+        f"- {t['label']}: {t.get('description', '')}"
+        for t in topics
+    )
+
+    report(f"Rewriting self from {len(topics)} discovered topics...")
+
+    try:
+        raw = llm.raw_complete(_SELF_EDIT_PROMPT.format(topics_block=topics_block))
+    except Exception as e:
+        report(f"LLM call failed: {e}")
+        return kb
+
+    extracted = _parse_json(raw)
+    if not extracted:
+        report("Model did not return parseable JSON — self-edit aborted.")
+        return kb
+
+    added = {}
+    for key in ("quotes", "traits", "references"):
+        existing      = kb.get(key, [])
+        existing_norm = {_normalise(x) for x in existing}
+        new_items     = [
+            x for x in extracted.get(key, [])
+            if isinstance(x, str) and not _is_junk(x) and _normalise(x) not in existing_norm
+        ]
+        kb[key]    = existing + new_items
+        added[key] = len(new_items)
+
+    existing_ext      = kb.get("persona_extensions", [])
+    existing_ext_norm = {_normalise(x) for x in existing_ext}
+    new_ext = [
+        x for x in extracted.get("persona_extensions", [])
+        if isinstance(x, str) and _normalise(x) not in existing_ext_norm
+    ]
+    kb["persona_extensions"] = existing_ext + new_ext
+    added["ext"] = len(new_ext)
+
+    # Merge self-generated hubs
+    existing_hubs     = {h["key"]: h for h in kb.get("self_hubs", [])}
+    added["hubs"]     = 0
+    added["hub_items"] = 0
+    for hub in extracted.get("new_hubs", []):
+        key   = re.sub(r'\W+', '_', hub.get("key", "")).strip('_').lower()
+        label = hub.get("label", "").strip()
+        color = hub.get("color", "#aaaaaa").strip()
+        items = [x for x in hub.get("items", []) if isinstance(x, str) and x.strip()]
+        if not key or not label or not items:
+            continue
+        if key in existing_hubs:
+            # Extend existing hub with new items
+            ex_norm = {_normalise(i) for i in existing_hubs[key].get("items", [])}
+            new_items = [i for i in items if _normalise(i) not in ex_norm]
+            existing_hubs[key]["items"].extend(new_items)
+            added["hub_items"] += len(new_items)
+        else:
+            existing_hubs[key] = {"key": key, "label": label, "color": color, "items": items}
+            added["hubs"] += 1
+            added["hub_items"] += len(items)
+
+    kb["self_hubs"] = list(existing_hubs.values())
+
+    save_knowledge(kb)
+    _cache["mtime"] = -1.0
+
+    report(
+        f"Self-edit complete — "
+        f"+{added['quotes']} quotes, +{added['traits']} traits, "
+        f"+{added['references']} references, +{added['ext']} behavioral directives, "
+        f"+{added['hubs']} new hubs, +{added['hub_items']} hub nodes"
+    )
+    return kb
+
+
 def run_continuous(ollama_client, stop_event, report_fn=None):
-    """Loop run_session until stop_event is set. 15 s pause between sessions."""
+    """Loop run_session until stop_event is set. Self-edit runs every 3 sessions."""
+    session_count = 0
     while not stop_event.is_set():
         try:
             run_session(ollama_client, report_fn=report_fn, stop_event=stop_event)
+            session_count += 1
         except Exception as e:
             print(f"[learning] Session error: {e}")
+
+        if session_count % 3 == 0 and not stop_event.is_set():
+            try:
+                run_self_edit(ollama_client, report_fn=report_fn, stop_event=stop_event)
+            except Exception as e:
+                print(f"[learning] Self-edit error: {e}")
+
         if not stop_event.is_set():
             stop_event.wait(timeout=15)
 

@@ -13,6 +13,13 @@
     { key: "references",   label: "Slang",         color: 0x00ff99, pos: [-4, -3,  3] },
   ];
 
+  const TOPICS_HUB_POS    = [0, 7, 0];
+  const TOPICS_COLOR      = 0xffcc00;
+  const _renderedTopicIds = new Set();
+
+  // Self-generated hubs: key → { pos, color, itemSet }
+  const _selfHubs = {};
+
   // Scene setup
   const container = document.getElementById("neural-container");
   const W = () => container.clientWidth;
@@ -152,9 +159,125 @@
       (kb.sessions || 0) + " sessions";
   }
 
+  function ensureTopics(topics) {
+    if (!Array.isArray(topics) || !topics.length) return;
+
+    // Create the topics hub once
+    if (!nodeObjects["cat_topics"]) {
+      const geo  = new THREE.SphereGeometry(0.45, 16, 16);
+      const mesh = new THREE.Mesh(geo, makeNodeMaterial(TOPICS_COLOR));
+      mesh.position.set(...TOPICS_HUB_POS);
+      mesh.userData = { label: "Discovered Topics", category: true, color: TOPICS_COLOR };
+      scene.add(mesh);
+      nodeObjects["cat_topics"] = { mesh, pulseT: 0 };
+    }
+
+    const newTopics = topics.filter(t => t.id && !_renderedTopicIds.has(t.id));
+    if (!newTopics.length) return;
+
+    const clusterR = 2.4 + Math.min(topics.length, 40) * 0.07;
+
+    newTopics.forEach(function (topic) {
+      _renderedTopicIds.add(topic.id);
+      const pos  = scatter(TOPICS_HUB_POS, clusterR);
+      const geo  = new THREE.SphereGeometry(0.22, 10, 10);
+      const mat  = makeNodeMaterial(TOPICS_COLOR, 0.9);
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.position.set(...pos);
+
+      const tip = topic.label + (topic.description ? "\n" + topic.description : "");
+      mesh.userData = { label: tip, category: false, color: TOPICS_COLOR };
+      mesh.scale.setScalar(0);
+      scene.add(mesh);
+
+      const id = "topics_" + topic.id;
+      nodeObjects[id] = { mesh, pulseT: 1.8, spawnT: 1.0 };
+      totalNodeCount++;
+
+      addEdge(pos, TOPICS_HUB_POS, TOPICS_COLOR);
+    });
+
+    document.getElementById("stat-nodes").textContent = totalNodeCount + " nodes";
+  }
+
+  function ensureSelfHubs(hubs) {
+    if (!Array.isArray(hubs) || !hubs.length) return;
+
+    hubs.forEach(function (hub) {
+      const key   = hub.key;
+      const label = hub.label;
+      const items = hub.items || [];
+      const colorHex = parseInt((hub.color || "#ffffff").replace("#", ""), 16);
+
+      // Spread new hubs in a ring around the scene, above the existing cluster
+      if (!_selfHubs[key]) {
+        const angle = Object.keys(_selfHubs).length * (Math.PI * 2 / 8);
+        const r     = 9;
+        const pos   = [
+          r * Math.cos(angle),
+          5 + (Math.random() - 0.5) * 2,
+          r * Math.sin(angle),
+        ];
+        _selfHubs[key] = { pos, color: colorHex, itemSet: new Set() };
+
+        // Hub sphere
+        const geo  = new THREE.SphereGeometry(0.45, 16, 16);
+        const mesh = new THREE.Mesh(geo, makeNodeMaterial(colorHex));
+        mesh.position.set(...pos);
+        mesh.userData = { label, category: true, color: colorHex };
+        scene.add(mesh);
+        nodeObjects["selfhub_" + key] = { mesh, pulseT: 2.0, spawnT: 1.0 };
+        totalNodeCount++;
+
+        // Connect new hub to origin
+        addEdge(pos, [0, 0, 0], colorHex);
+
+        // Add to legend dynamically
+        const legend = document.getElementById("neural-legend");
+        if (legend) {
+          const item = document.createElement("div");
+          item.className = "legend-item";
+          item.innerHTML =
+            `<span class="dot" style="background:${hub.color}"></span>${label}`;
+          legend.appendChild(item);
+        }
+      }
+
+      const hubData  = _selfHubs[key];
+      const newItems = items.filter(function (i) { return !hubData.itemSet.has(i); });
+      if (!newItems.length) return;
+
+      const clusterR = 2.0 + Math.min(items.length, 40) * 0.06;
+
+      newItems.forEach(function (text, idx) {
+        hubData.itemSet.add(text);
+        const pos2  = scatter(hubData.pos, clusterR);
+        const size  = 0.11 + Math.min(text.length, 60) / 800;
+        const geo2  = new THREE.SphereGeometry(size, 8, 8);
+        const mat2  = makeNodeMaterial(hubData.color, 0.85);
+        const mesh2 = new THREE.Mesh(geo2, mat2);
+        mesh2.position.set(...pos2);
+        const shortText = text.length > 80 ? text.slice(0, 77) + "..." : text;
+        mesh2.userData  = { label: shortText, category: false, color: hubData.color };
+        mesh2.scale.setScalar(0);
+        scene.add(mesh2);
+
+        const id = "selfhub_" + key + "_" + (hubData.itemSet.size + idx);
+        nodeObjects[id] = { mesh: mesh2, pulseT: 1.8, spawnT: 1.0 };
+        totalNodeCount++;
+
+        addEdge(pos2, hubData.pos, hubData.color);
+      });
+    });
+
+    document.getElementById("stat-nodes").textContent = totalNodeCount + " nodes";
+  }
+
   // Public API
   window.neuralUpdate = function (kb) {
     ensureItems(kb);
+    ensureTopics(kb.discovered_topics);
+    ensureSelfHubs(kb.self_hubs);
   };
 
   // Pulse a category's existing nodes briefly (used by chat responses)

@@ -1,5 +1,5 @@
 {
-  "backend": "gemini",
+  "backend": "ollama",
   "serial": {
     "port": "COM3",
     "baud_rate": 9600,
