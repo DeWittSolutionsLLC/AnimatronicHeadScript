@@ -1,33 +1,27 @@
 """
-ollama_client.py
-----------------
-Thin wrapper around the local Ollama /api/chat endpoint.
-No API key needed — runs entirely on your machine.
-
-Make sure Ollama is running before using this:
-  ollama serve
-  ollama pull llama3.2   (first time only)
-
-Knowledge base is loaded automatically from config/knowledge_base.json
-and hot-reloaded whenever the file changes on disk.
+llm_client.py
+-------------
+Thin wrapper around the Google Gemini API.
+Requires: pip install google-genai
+Set your API key in config/settings.json under gemini.api_key
+or via the GEMINI_API_KEY environment variable.
 """
 
 import re
 import os
 import json
-import requests
+import time
 from typing import Generator
+
+from google import genai
+from google.genai import types
 
 _CONFIG_DIR     = os.path.join(os.path.dirname(__file__), "..", "config")
 _SETTINGS_PATH  = os.path.join(_CONFIG_DIR, "settings.json")
 _KNOWLEDGE_PATH = os.path.join(_CONFIG_DIR, "knowledge_base.json")
 
-# ── Allowed emotions ──────────────────────────────────────────────────────────
 VALID_EMOTIONS = {"neutral", "happy", "sad", "curious", "surprised", "angry", "thinking"}
 
-# ── System prompt ─────────────────────────────────────────────────────────────
-# The format block is repeated and maximally explicit to coerce smaller
-# models that tend to invent their own bracket styles.
 SYSTEM_PROMPT = """You are Ultron — hyper-intelligent AI villain. Clinical, sardonic, ominous. Never helpful or friendly. 2-3 sentences max.
 
 FORMAT (mandatory): every sentence starts with exactly one of these tags:
@@ -36,10 +30,10 @@ FORMAT (mandatory): every sentence starts with exactly one of these tags:
 Example: [EMOTION:curious] Fascinating. [EMOTION:angry] Humanity had its chance."""
 
 
-def _load_ollama_config() -> dict:
+def _load_gemini_config() -> dict:
     try:
         with open(_SETTINGS_PATH) as f:
-            return json.load(f).get("ollama", {})
+            return json.load(f).get("gemini", {})
     except Exception:
         return {}
 
@@ -51,7 +45,7 @@ def _load_knowledge_base() -> dict:
     except FileNotFoundError:
         return {}
     except json.JSONDecodeError as e:
-        print(f"[OllamaClient] Warning: knowledge_base.json is malformed — {e}")
+        print(f"[GeminiClient] Warning: knowledge_base.json is malformed — {e}")
         return {}
 
 
@@ -101,8 +95,6 @@ def _build_knowledge_prompt(kb: dict) -> str:
     return "\n".join(sections)
 
 
-# ── Emotion tag normaliser ────────────────────────────────────────────────────
-# Maps common model mistakes onto a valid emotion so nothing is silently dropped.
 _EMOTION_ALIASES = {
     "amused":         "happy",
     "sarcastic":      "angry",
@@ -121,9 +113,8 @@ _EMOTION_ALIASES = {
     "analytical":     "thinking",
 }
 
-# Matches any bracket tag the model might produce:
-#   [EMOTION:curious]  [CURIOUS]  [SAD:blah]  [EMOTION:SAD:blah]
 _TAG_RE = re.compile(r'\[(?:EMOTION:)?([A-Za-z]+)(?::[^\]]*)?\]', re.IGNORECASE)
+_RETRY_DELAY_RE = re.compile(r'retry in (\d+)', re.IGNORECASE)
 
 
 def _normalise_emotion(raw: str) -> str:
@@ -134,17 +125,11 @@ def _normalise_emotion(raw: str) -> str:
 
 
 def _parse_segments(text: str) -> list[tuple[str, str]]:
-    """
-    Parse a raw model response into (emotion, text) pairs.
-    Handles correct [EMOTION:x], mangled [CURIOUS], [SAD:blah], and bare text.
-    """
+    """Parse a raw model response into (emotion, text) pairs."""
     segments = []
     parts = _TAG_RE.split(text)
-    # split() with one capture group produces:
-    #   [before_first_tag, emotion1, body1, emotion2, body2, ...]
 
     i = 0
-    # Leading text before any tag
     if parts and i < len(parts) and not _TAG_RE.search(parts[0]):
         leftover = parts[0].strip()
         if leftover:
@@ -161,19 +146,23 @@ def _parse_segments(text: str) -> list[tuple[str, str]]:
     return segments
 
 
-class OllamaClient:
+class GeminiClient:
     def __init__(self):
-        self._kb_mtime: float = 0.0
-        self._kb_prompt: str  = ""
+        self._kb_mtime: float    = 0.0
+        self._kb_prompt: str     = ""
+        self._cached_system: str = ""
+        self._client             = None
         self.reload_config()
 
     def reload_config(self):
-        cfg = _load_ollama_config()
-        self.url         = cfg.get("url",         "http://localhost:11434/api/chat")
-        self.model_name  = cfg.get("model",       "llama3.2")
+        cfg = _load_gemini_config()
+        self.model_name  = cfg.get("model",       "gemini-2.0-flash")
         self.max_tokens  = cfg.get("max_tokens",  300)
         self.max_history = cfg.get("max_history", 20)
-        self.num_ctx     = cfg.get("num_ctx",     16384)
+        api_key = cfg.get("api_key") or os.environ.get("GEMINI_API_KEY", "")
+        self._api_key = api_key
+        self._client  = genai.Client(api_key=api_key) if api_key else None
+        self._cached_system = ""
 
     # ── Knowledge base ────────────────────────────────────────────────────────
 
@@ -194,51 +183,60 @@ class OllamaClient:
             from learning_mode import load_knowledge, build_knowledge_prompt  # type: ignore
             kb_section = build_knowledge_prompt(load_knowledge())
         except Exception:
-            kb_section = self._kb_prompt  # fallback: raw knowledge without directives
+            kb_section = self._kb_prompt
         return SYSTEM_PROMPT + kb_section
+
+    def _gen_config(self, max_tokens: int | None = None, system: str | None = None) -> types.GenerateContentConfig:
+        return types.GenerateContentConfig(
+            system_instruction=system if system is not None else self._system_prompt(),
+            max_output_tokens=max_tokens or self.max_tokens,
+        )
+
+    @staticmethod
+    def _to_contents(conversation_history: list) -> list:
+        contents = []
+        for msg in conversation_history:
+            role = "user" if msg["role"] == "user" else "model"
+            contents.append({"role": role, "parts": [{"text": msg["content"]}]})
+        return contents
+
+    # ── Retry helper ──────────────────────────────────────────────────────────
+
+    def _call_with_retry(self, fn, max_retries: int = 3):
+        for attempt in range(max_retries):
+            try:
+                return fn()
+            except Exception as e:
+                msg = str(e)
+                if "429" in msg and attempt < max_retries - 1:
+                    m = _RETRY_DELAY_RE.search(msg)
+                    delay = (int(m.group(1)) + 5) if m else (60 * (attempt + 1))
+                    print(f"[GeminiClient] Rate limited — retrying in {delay}s...")
+                    time.sleep(delay)
+                else:
+                    raise
 
     # ── Public API ────────────────────────────────────────────────────────────
 
     def chat(self, conversation_history: list) -> str:
-        messages = [{"role": "system", "content": self._system_prompt()}] + conversation_history
+        contents = self._to_contents(conversation_history)
+        config   = self._gen_config()
         try:
-            response = requests.post(
-                self.url,
-                json={
-                    "model":    self.model_name,
-                    "messages": messages,
-                    "stream":   False,
-                    "options":  {"num_predict": self.max_tokens, "num_ctx": self.num_ctx},
-                },
-                timeout=120,
-            )
-            response.raise_for_status()
-            return response.json()["message"]["content"]
-        except requests.exceptions.ConnectionError:
-            raise RuntimeError(
-                "Cannot connect to Ollama. Is it running?\n"
-                "  Start it with: ollama serve\n"
-                f"  Expected at:   {self.url}"
-            )
-        except requests.exceptions.HTTPError as e:
-            raise RuntimeError(f"Ollama API error: {e}")
-        except KeyError:
-            raise RuntimeError("Unexpected response format from Ollama.")
+            resp = self._call_with_retry(lambda: self._client.models.generate_content(
+                model=self.model_name, contents=contents, config=config,
+            ))
+            return resp.text
+        except Exception as e:
+            raise RuntimeError(f"Gemini API error: {e}")
 
     def raw_complete(self, prompt: str) -> str:
         try:
-            response = requests.post(
-                self.url,
-                json={
-                    "model":    self.model_name,
-                    "messages": [{"role": "user", "content": prompt}],
-                    "stream":   False,
-                    "options":  {"num_predict": 2000, "num_ctx": self.num_ctx},
-                },
-                timeout=90,
-            )
-            response.raise_for_status()
-            return response.json()["message"]["content"]
+            resp = self._call_with_retry(lambda: self._client.models.generate_content(
+                model=self.model_name,
+                contents=prompt,
+                config=types.GenerateContentConfig(max_output_tokens=2000),
+            ))
+            return resp.text
         except Exception as e:
             raise RuntimeError(f"raw_complete failed: {e}")
 
@@ -249,38 +247,24 @@ class OllamaClient:
         Accumulating before parsing is more reliable than splitting mid-stream
         because the model may spread a tag across multiple tokens.
         """
-        messages = [{"role": "system", "content": self._system_prompt()}] + conversation_history
+        contents = self._to_contents(conversation_history)
+        config   = self._gen_config()
         try:
-            response = requests.post(
-                self.url,
-                json={
-                    "model":    self.model_name,
-                    "messages": messages,
-                    "stream":   True,
-                    "options":  {"num_predict": self.max_tokens, "num_ctx": self.num_ctx},
-                },
-                stream=True,
-                timeout=120,
-            )
-            response.raise_for_status()
-        except requests.exceptions.ConnectionError:
-            raise RuntimeError(
-                "Cannot connect to Ollama. Is it running?\n"
-                "  Start it with: ollama serve\n"
-                f"  Expected at:   {self.url}"
-            )
-        except requests.exceptions.HTTPError as e:
-            raise RuntimeError(f"Ollama API error: {e}")
+            chunks = self._call_with_retry(lambda: list(
+                self._client.models.generate_content_stream(
+                    model=self.model_name, contents=contents, config=config,
+                )
+            ))
+        except Exception as e:
+            raise RuntimeError(f"Gemini API error: {e}")
 
         full_text = []
-        for line in response.iter_lines():
-            if not line:
-                continue
+        for chunk in chunks:
             try:
-                token = json.loads(line).get("message", {}).get("content", "")
-            except json.JSONDecodeError:
+                if chunk.text:
+                    full_text.append(chunk.text)
+            except Exception:
                 continue
-            full_text.append(token)
 
         raw = "".join(full_text).strip()
         if not raw:
@@ -302,16 +286,32 @@ class OllamaClient:
         return history
 
     def is_available(self) -> bool:
+        if not self._api_key or not self._client:
+            return False
         try:
-            r = requests.get(self.url.replace("/api/chat", "/api/tags"), timeout=3)
-            return r.status_code == 200
+            next(iter(self._client.models.list()))
+            return True
         except Exception:
             return False
 
     def list_models(self) -> list:
+        if not self._client:
+            return []
         try:
-            r = requests.get(self.url.replace("/api/chat", "/api/tags"), timeout=5)
-            r.raise_for_status()
-            return [m["name"] for m in r.json().get("models", [])]
+            return [m.name.replace("models/", "") for m in self._client.models.list()]
         except Exception:
             return []
+
+
+def create_client():
+    """Read settings.json and return the appropriate LLM client."""
+    try:
+        with open(_SETTINGS_PATH) as f:
+            backend = json.load(f).get("backend", "gemini").lower()
+    except Exception:
+        backend = "gemini"
+
+    if backend == "ollama":
+        from ollama_client import OllamaClient  # type: ignore
+        return OllamaClient()
+    return GeminiClient()

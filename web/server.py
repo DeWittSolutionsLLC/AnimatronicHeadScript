@@ -1,7 +1,7 @@
 """
 server.py — Ultron Web Interface
 Run: python web/server.py
-Deps: pip install flask flask-socketio
+Deps: pip install flask flask-socketio google-generativeai
 """
 
 import os
@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "python"))
 from flask import Flask, jsonify, send_from_directory
 from flask_socketio import SocketIO, emit
 
-from ollama_client import OllamaClient
+from llm_client import create_client
 from serial_controller import SerialController
 from tts_engine import TTSEngine
 from idle_animator import IdleAnimator
@@ -51,10 +51,10 @@ def _audio_ready(src_path: str):
 
 
 # ── Animatronic components ─────────────────────────────────────────────────────
-ollama = OllamaClient()
+llm = create_client()
 serial = SerialController()
 emap   = emotion_map.load()
-tts    = TTSEngine(serial_controller=serial, audio_ready_cb=_audio_ready)
+tts  = TTSEngine(serial_controller=serial, audio_ready_cb=_audio_ready)
 idle   = IdleAnimator(serial)
 
 serial.connect()
@@ -74,11 +74,11 @@ def knowledge():
 @app.route("/status")
 def status():
     return jsonify({
-        "ollama_ok": ollama.is_available(),
+        "llm_ok": llm.is_available(),
         "serial_ok": serial.is_connected(),
         "learning":  bool(_learning_thread and _learning_thread.is_alive()),
         "busy":      _busy.is_set(),
-        "model":     ollama.model,
+        "model":     llm.model_name,
     })
 
 
@@ -88,7 +88,7 @@ def status():
 def on_connect():
     emit("knowledge_update", load_knowledge())
     emit("status_update", {
-        "ollama_ok": ollama.is_available(),
+        "llm_ok": llm.is_available(),
         "serial_ok": serial.is_connected(),
         "learning":  bool(_learning_thread and _learning_thread.is_alive()),
     })
@@ -108,7 +108,7 @@ def on_message(data):
         _busy.set()
         try:
             with history_lock:
-                history = ollama.trim_history(history)
+                history = llm.trim_history(history)
                 history.append({"role": "user", "content": text})
 
             idle.set_speaking(True)
@@ -119,7 +119,7 @@ def on_message(data):
 
             def _stream():
                 try:
-                    for item in ollama.stream_chat(history):
+                    for item in llm.stream_chat(history):
                         q.put(item)
                 except Exception as e:
                     q.put(e)
@@ -188,7 +188,7 @@ def on_start_learning():
 
     _learning_thread = threading.Thread(
         target=run_continuous,
-        args=(ollama, _learning_stop, _report),
+        args=(llm, _learning_stop, _report),
         daemon=True,
     )
     _learning_thread.start()

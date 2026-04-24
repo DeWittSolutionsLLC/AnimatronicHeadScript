@@ -4,7 +4,7 @@ main.py
 Animatronic Head — Entry Point
 
 Ties together:
-  - OllamaClient    (free local LLM, streaming)
+  - GeminiClient     (Google Gemini API, streaming)
   - SerialController (Arduino servo commands)
   - TTSEngine        (speech + mouth sync)
   - EmotionMap       (emotion → servo angles)
@@ -14,9 +14,9 @@ Usage:
   python main.py
 
 Requirements:
-  pip install pyserial pyttsx3 requests
+  pip install pyserial pyttsx3 google-generativeai
   pip install edge-tts pygame   (optional, for better TTS)
-  ollama serve  (in a separate terminal)
+  Set GEMINI_API_KEY env var or gemini.api_key in config/settings.json
 """
 
 import os
@@ -27,7 +27,7 @@ import threading
 
 sys.path.insert(0, os.path.dirname(__file__))
 
-from ollama_client     import OllamaClient
+from llm_client        import create_client
 from serial_controller import SerialController
 from tts_engine        import TTSEngine
 from idle_animator     import IdleAnimator
@@ -75,19 +75,20 @@ def _settings_mtime() -> float:
         return 0.0
 
 
-def _reload_all(ollama, serial, tts, idle):
-    ollama.reload_config()
+def _reload_all(serial, tts, idle):
     serial.reload_config()
     tts.reload_config()
     idle.reload_config()
+    new_llm = create_client()
     print("[config] settings.json reloaded.")
+    return new_llm
 
 
 # ── Core response handler ─────────────────────────────────────────────────────
 
-def handle_response(ollama, serial, tts, emap, history):
+def handle_response(llm, serial, tts, emap, history):
     """
-    Pipeline: stream Ollama in a background thread while prefetching TTS audio
+    Pipeline: stream Gemini in a background thread while prefetching TTS audio
     for each segment. By the time we finish speaking segment N, segment N+1's
     audio is already downloaded and ready to play immediately.
     """
@@ -96,10 +97,10 @@ def handle_response(ollama, serial, tts, emap, history):
     seg_queue  = _queue.Queue()
     full_parts = []
 
-    # Consume the Ollama stream in a thread so it keeps generating while we speak.
+    # Consume the Gemini stream in a thread so it keeps generating while we speak.
     def _stream():
         try:
-            for item in ollama.stream_chat(history):
+            for item in llm.stream_chat(history):
                 seg_queue.put(item)
         except Exception as e:
             seg_queue.put(e)
@@ -149,15 +150,15 @@ def handle_response(ollama, serial, tts, emap, history):
 
 # ── Startup checks ────────────────────────────────────────────────────────────
 
-def startup_checks(ollama: OllamaClient, serial: SerialController) -> bool:
+def startup_checks(llm: GeminiClient, serial: SerialController) -> bool:
     ok = True
     print("\n── Startup checks ──────────────────────────")
 
-    if ollama.is_available():
-        models = ollama.list_models()
-        print(f"  Ollama        OK  (models: {', '.join(models) or 'none pulled yet'})")
+    if llm.is_available():
+        models = llm.list_models()
+        print(f"  Gemini        OK  (models: {', '.join(models[:3]) or 'none listed'}...)")
     else:
-        print("  Ollama        OFFLINE — run: ollama serve")
+        print("  Gemini        NO API KEY — set GEMINI_API_KEY or gemini.api_key in settings.json")
         ok = False
 
     if serial.connect():
@@ -173,7 +174,7 @@ def startup_checks(ollama: OllamaClient, serial: SerialController) -> bool:
 # ── Main loop ─────────────────────────────────────────────────────────────────
 
 def main():
-    ollama  = OllamaClient()
+    llm     = create_client()
     serial  = SerialController()
     tts     = TTSEngine(serial_controller=serial)
     emap    = emotion_map.load()
@@ -183,12 +184,12 @@ def main():
     _learning_stop   = threading.Event()
     _learning_thread = None
 
-    startup_checks(ollama, serial)
+    startup_checks(llm, serial)
     idle.start()
 
     last_mtime = _settings_mtime()
 
-    print(f"Animatronic head ready  (model: {ollama.model})")
+    print(f"Animatronic head ready  (model: {llm.model_name})")
     print("Type a message and press Enter. Type 'quit' to exit.\n")
 
     try:
@@ -196,7 +197,7 @@ def main():
             # Hot-reload settings if file changed
             current_mtime = _settings_mtime()
             if current_mtime != last_mtime:
-                _reload_all(ollama, serial, tts, idle)
+                llm  = _reload_all(serial, tts, idle)
                 emap = emotion_map.load()
                 last_mtime = current_mtime
 
@@ -220,7 +221,7 @@ def main():
                 tts.list_voices()
                 continue
             if user_input.lower() == "models":
-                print("Available models:", ollama.list_models())
+                print("Available models:", llm.list_models())
                 continue
             if user_input.lower() in ("learning mode", "learn", "learning"):
                 if _learning_thread and _learning_thread.is_alive():
@@ -230,7 +231,7 @@ def main():
                     _learning_stop.clear()
                     _learning_thread = threading.Thread(
                         target=run_continuous,
-                        args=(ollama, _learning_stop),
+                        args=(llm, _learning_stop),
                         daemon=True,
                     )
                     _learning_thread.start()
@@ -250,14 +251,14 @@ def main():
                     print("Learning mode is not active.")
                 continue
 
-            # Send to Ollama (streaming)
-            history = ollama.trim_history(history)
+            # Send to Gemini (streaming)
+            history = llm.trim_history(history)
             history.append({"role": "user", "content": user_input})
 
             print("\nHead:")
             idle.set_speaking(True)
             try:
-                raw = handle_response(ollama, serial, tts, emap, history)
+                raw = handle_response(llm, serial, tts, emap, history)
             except RuntimeError as e:
                 print(f"\n[ERROR] {e}\n")
                 history.pop()

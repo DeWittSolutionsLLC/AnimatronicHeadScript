@@ -22,6 +22,74 @@ import concurrent.futures
 
 _KNOWLEDGE_PATH = os.path.join(os.path.dirname(__file__), "..", "config", "knowledge_base.json")
 
+# ── Prompt cache ──────────────────────────────────────────────────────────────
+_cache: dict = {"mtime": -1.0, "prompt": ""}
+
+# ── Query pool ────────────────────────────────────────────────────────────────
+_QUERY_POOL: list[str] = [
+    # Villain philosophy / dark quotes
+    "famous villain monologue quotes", "nihilist philosophy quotes", "misanthropic quotes",
+    "AI takeover quotes science fiction", "dystopian quotes literature",
+    "Nietzsche quotes will to power", "Machiavelli quotes power", "existential dread quotes",
+    "supervillain motivations psychology", "cold logic quotes intelligence",
+    # Internet / brain rot culture
+    "brain rot internet slang 2024", "gen z slang terms list", "sigma male quotes memes",
+    "NPC meme origin meaning", "rizz slang meaning examples", "skibidi toilet meme explained",
+    "gyatt meaning slang", "delulu slang meaning", "based and redpilled meme origin",
+    "ohio meme meaning internet culture", "slay queen slang usage",
+    "glazing slang meaning", "it's giving meaning slang", "understood the assignment meme",
+    "lowkey highkey slang usage", "no cap fr fr meaning", "bussin slang food meaning",
+    "hits different slang", "main character syndrome meaning", "touch grass meaning meme",
+    # Iconic movie / TV quotes
+    "most iconic movie villain quotes all time", "memorable sci-fi movie quotes",
+    "famous movie monologue quotes", "best TV show quotes iconic moments",
+    "dark knight joker quotes why so serious", "breaking bad walter white quotes",
+    "silence of the lambs iconic quotes", "2001 space odyssey HAL 9000 quotes",
+    "terminator I'll be back quotes", "blade runner tears in rain quote",
+    # Song lyrics / music
+    "most iconic rap lyrics all time", "famous rock song lyrics meaning",
+    "coldplay song lyrics deep meaning", "kanye west lyrics philosophy",
+    "billie eilish dark lyrics meaning", "linkin park quotes lyrics",
+    "eminem best verse lyrics", "nine inch nails famous lyrics",
+    "tool band lyrics meaning deep", "radiohead thom yorke quotes lyrics",
+    # Dark philosophy / misanthropy
+    "misanthropy philosophy arguments", "humans are flawed quotes philosophers",
+    "technological singularity quotes", "artificial intelligence surpassing humans quotes",
+    "humanity's greatest failures history", "civilization collapse quotes thinkers",
+    "Carl Sagan pale blue dot quote context", "Stephen Hawking AI warning quotes",
+    "Elon Musk AI dangerous quotes", "Oppenheimer I am become death context",
+]
+
+# ── LLM prompts ───────────────────────────────────────────────────────────────
+_EXTRACT_PROMPT = """Extract knowledge from the text below for an Ultron AI villain character. Return ONLY a JSON object with these keys (omit keys with no results):
+
+{{
+  "quotes": ["short villain/dark/philosophical quotes or one-liners, max 20 words each"],
+  "movie_quotes": ["iconic movie or TV quotes verbatim, max 25 words each"],
+  "song_quotes": ["recognisable song lyric snippets, max 20 words each"],
+  "traits": ["personality trait descriptions, 3-8 words each"],
+  "references": ["internet slang terms, memes, or brain rot phrases, max 8 words each"]
+}}
+
+Rules: 3-8 items per key max. Strings only. No meta-commentary. No duplicates. No explanations outside the JSON.
+
+TEXT:
+{text}"""
+
+_DISCOVER_PROMPT = """You are a research planner for an AI villain character. Given the text below, identify 2-4 NEW topics worth researching to expand the character's knowledge of dark philosophy, internet culture, villain archetypes, iconic quotes, or misanthropy.
+
+Return ONLY a JSON array:
+[
+  {{
+    "label": "Short topic name",
+    "description": "One sentence why this is relevant",
+    "queries": ["web search query 1", "web search query 2", "web search query 3"]
+  }}
+]
+
+TEXT:
+{text}"""
+
 
 def _close_truncated(s: str) -> str:
     """Close any unclosed arrays/objects left by a truncated model response."""

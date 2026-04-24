@@ -1,4 +1,5 @@
 {
+  "backend": "gemini",
   "serial": {
     "port": "COM3",
     "baud_rate": 9600,
@@ -6,11 +7,17 @@
     "mock": false,
     "debug": false
   },
+  "gemini": {
+    "api_key": "AIzaSyC9KsokyCJvE1YN52qt2QhKGCgmqapHB8U",
+    "model": "gemini-2.0-flash",
+    "max_tokens": 300,
+    "max_history": 20
+  },
   "ollama": {
     "url": "http://localhost:11434/api/chat",
-    "model": "llama3.2",
-    "max_tokens": 120,
-    "max_history": 8,
+    "model": "llama3.2:1b",
+    "max_tokens": 300,
+    "max_history": 20,
     "num_ctx": 4096
   },
   "tts": {

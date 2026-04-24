@@ -14,7 +14,7 @@
   const audioPlayer = document.getElementById("audio-player");
   const learningBar = document.getElementById("learning-bar");
   const learningLog = document.getElementById("learning-log");
-  const dotOllama   = document.getElementById("dot-ollama");
+  const dotLLM      = document.getElementById("dot-llm");
   const dotSerial   = document.getElementById("dot-serial");
   const dotLearning = document.getElementById("dot-learning");
 
@@ -101,7 +101,7 @@
   });
 
   socket.on("status_update", data => {
-    if (data.ollama_ok !== undefined) setDot(dotOllama, data.ollama_ok ? "ok" : "error");
+    if (data.llm_ok !== undefined) setDot(dotLLM, data.llm_ok ? "ok" : "error");
     if (data.serial_ok !== undefined) setDot(dotSerial, data.serial_ok ? "ok" : "error");
     if (data.learning  !== undefined) {
       isLearning = data.learning;
